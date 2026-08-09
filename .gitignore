@@ -2,3 +2,21 @@
 PROJECT_SCOPE.md
 ARCHITECTURE.md
 TASKS.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Ambiente e segredos
+.env
+
+# Dados de runtime (a planilha-template versionada fica na raiz do repo)
+data/*.db
+data/*.xlsx
+!data/.gitkeep

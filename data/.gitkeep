@@ -1,0 +1,2 @@
+# Mantém a pasta data/ no versionamento.
+# Bancos (*.db) e planilhas de runtime (*.xlsx) são ignorados pelo .gitignore.

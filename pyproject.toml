@@ -1,0 +1,30 @@
+[project]
+name = "stravasync"
+version = "0.1.0"
+description = "Sincroniza corridas do Strava para uma planilha Excel de carga de treino (ACWR)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "openpyxl>=3.1",
+    "pandas>=2.2",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+# Aplicação executada via `python -m src.main` — não é empacotada/instalada.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
