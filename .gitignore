@@ -19,4 +19,6 @@ venv/
 # Dados de runtime (a planilha-template versionada fica na raiz do repo)
 data/*.db
 data/*.xlsx
+data/*.log
+data/*.log.*
 !data/.gitkeep

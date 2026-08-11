@@ -1,20 +1,31 @@
-"""Testes de fumaça da estrutura (Fase 1): módulos importáveis e modelo básico."""
+"""Testes de fumaça da estrutura (Fase 1): os módulos das camadas são importáveis."""
 from __future__ import annotations
 
-from datetime import date
+import importlib
+
+import pytest
+
+MODULOS = (
+    "src.main",
+    "src.scheduler",
+    "src.api.strava_client",
+    "src.services.activity_service",
+    "src.services.sync_service",
+    "src.services.excel_service",
+    "src.services.database_service",
+    "src.repositories.activity_repository",
+    "src.utils.auth",
+    "src.utils.config",
+    "src.utils.logger",
+)
+
+
+@pytest.mark.parametrize("modulo", MODULOS)
+def test_modulo_importavel(modulo):
+    assert importlib.import_module(modulo) is not None
 
 
 def test_main_importavel():
     import src.main
 
     assert callable(src.main.main)
-
-
-def test_dailyload_pace():
-    from src.models.daily_load import DailyLoad
-
-    corrida = DailyLoad(day=date(2026, 1, 1), carga_km=10.0, tempo_total_s=3000)  # 50min/10km
-    assert corrida.pace_min_km == 5.0
-
-    descanso = DailyLoad(day=date(2026, 1, 2), carga_km=0.0, tempo_total_s=0)
-    assert descanso.pace_min_km is None

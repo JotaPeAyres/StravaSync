@@ -8,9 +8,9 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
 
 ## Estado atual
 
-- **Fase 1 (Estrutura): concluída** — scaffolding na branch **`fase-1-estrutura`** (2 commits à frente da `main`; ainda não mergeada).
-- `main` contém só a documentação + o template Excel. O código (`src/`, `tests/`, `pyproject.toml`) está na `fase-1-estrutura`.
-- **Próxima: Fase 2 (Configuração)** — ver `TASKS.md`.
+- **Fase 1 (Estrutura): concluída e já na `main`** (a branch `fase-1-estrutura` está mergeada; pode ser apagada).
+- **Fase 2 (Configuração): concluída** na branch **`fase-2-configuracao`** — `Config` tipado, logging central, modelos finalizados, testes. Ainda não mergeada.
+- **Próxima: Fase 3 (Strava/OAuth)** — ver `TASKS.md`.
 
 ## Convenções de trabalho (IMPORTANTE)
 
@@ -47,24 +47,36 @@ src/
   services/database_service.py         # Fase 4
   models/activity.py, models/daily_load.py
   repositories/activity_repository.py  # Fase 4
-  utils/config.py (Fase 2), logger.py (Fase 2), auth.py (Fase 3)
+  utils/config.py ✅, logger.py ✅, auth.py (Fase 3)
   main.py (executável), scheduler.py   # Fase 7
 tests/            # pytest
-data/             # .gitkeep; *.db e *.xlsx de runtime são ignorados
+data/             # .gitkeep; *.db, *.xlsx e *.log de runtime são ignorados
 ```
+
+## Configuração e logging (Fase 2 — já implementados)
+
+- **`utils/config.py`**: `load_config()` → `Config` congelado. Obrigatórias: as 3 credenciais do Strava + `START_DATE`. Opcionais com padrão: `EXCEL_PATH`, `TEMPLATE_PATH`, `LOG_LEVEL`, `LOG_FILE`.
+  - Erros são **acumulados** e levantados de uma vez em `ConfigError` — nada de corrigir o `.env` uma variável por vez.
+  - **Caminhos relativos partem de `PROJECT_ROOT`**, não do CWD (o scheduler da Fase 7 pode rodar de qualquer lugar).
+  - O ambiente tem precedência sobre o `.env` (permite sobrescrever em CI/agendador).
+  - Segredos ficam fora do `repr`; use `config.safe_summary()` para logar a config.
+- **`utils/logger.py`**: `setup_logging(level, log_file, force=False)` é **idempotente**; chamada só no `main.py`. Demais módulos usam `get_logger(__name__)`. Arquivo rotativo em UTF-8 (acentos); `httpx`/`httpcore`/`urllib3` silenciados em WARNING.
+- **`Activity.date` é horário LOCAL e ingênuo** (o `start_date_local` do Strava). A planilha é indexada pelo dia local: corrida às 22h de 01/01 vai para a linha de 01/01, não a de 02/01 em UTC. A Fase 3 deve ler `start_date_local`, **não** `start_date`.
+- Conversões de unidade moram nos modelos: `Activity.distance_km`, `Activity.day`, `DailyLoad.pace_min_km`, `DailyLoad.tempo_total` (timedelta), `DailyLoad.is_rest_day`, `DailyLoad.dia_de_descanso()`.
 
 ## Ambiente e comandos
 
 - Python **3.12.7**; `.venv` já criado (gitignored). `uv` **0.12.2** no PATH.
-- `uv sync` — instala deps · `uv run pytest` · `uv run ruff check .` · `python -m src.main`.
-- Config via `.env` (veja `.env.example`): `STRAVA_CLIENT_ID/SECRET/REFRESH_TOKEN`, `EXCEL_PATH`, `TEMPLATE_PATH`, `START_DATE`.
-- Nota: a variável `SSL_CERT_FILE` quebrada (sobra de outro projeto) foi removida — `uv` funciona sem workaround. O Git Bash interno do Claude roda com PATH restrito; no PowerShell/terminal do usuário o `uv` funciona normalmente.
+- `uv sync` — instala deps · `uv run pytest` · `uv run ruff check .` · `uv run python -m src.main`.
+- Config via `.env` (veja `.env.example`). O `.env` local já existe, com as credenciais **em branco** — preencher na Fase 3.
+- **Ruff**: o `pyproject.toml` não fixa `select`, então valem os padrões da versão instalada (0.16.1), que incluem `DTZ` e `C4`. Considerar fixar um `select` explícito na etapa de Qualidade.
+- Nota: a variável `SSL_CERT_FILE` quebrada (sobra de outro projeto) ainda aparece como *warning* do `uv` no shell do Claude — inofensiva, não bloqueia nada.
 
-## Próximo passo — Fase 2 (Configuração)
+## Próximo passo — Fase 3 (Strava: OAuth + API)
 
-Em nova branch `fase-2-configuracao` a partir da `main` (mergear a Fase 1 na `main` antes, se quiser um trunk limpo):
+Em nova branch `fase-3-strava` a partir da `main` (mergear a Fase 2 antes):
 
-- `utils/config.py`: carregar `.env` via `python-dotenv` → objeto `Config` tipado (credenciais, caminhos, `START_DATE` como `date`).
-- `utils/logger.py`: logging estruturado central.
-- Finalizar/ajustar os modelos (`Activity`, `DailyLoad`) conforme necessário.
-- Referência detalhada: `TASKS.md` › Fase 2.
+- `utils/auth.py`: trocar o `refresh_token` por um access token, com renovação automática.
+- `api/strava_client.py`: cliente `httpx` — buscar atleta e atividades, paginação, tratamento de erros.
+- Filtrar apenas `type == "Run"`; mapear o JSON para `Activity` (atenção ao `start_date_local`).
+- Referência detalhada: `TASKS.md` › Fase 3.
