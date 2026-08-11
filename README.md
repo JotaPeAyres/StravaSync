@@ -28,12 +28,12 @@ O arquivo base `Cópia de Planilha_carga_corrida.xlsx` é o **template**. O app 
    cp "Cópia de Planilha_carga_corrida.xlsx" data/corredor.xlsx
    ```
 2. Aponte `EXCEL_PATH` no `.env` para essa cópia (e `TEMPLATE_PATH` para o modelo base).
-3. Defina `START_DATE` — a data que corresponde ao **`Dia 1`** (linha 2) da planilha.
+3. Defina `START_DATE` — a data da **primeira coleta de dados** desse corredor, que corresponde ao **`Dia 1`** (linha 2) da planilha.
 4. Preencha as credenciais do Strava (`STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`).
 
 A partir daí o app preenche os dias de forma **contígua** (dias sem corrida recebem carga `0`), mapeando `dia = (data - START_DATE).days + 1` → `linha = dia + 1`.
 
-> ⚠️ **`START_DATE` é definida uma vez.** Alterá-la depois desloca o mapeamento data → linha e desalinha tudo que já foi gravado. Para recomeçar, use uma cópia nova do template.
+> ⚠️ **`START_DATE` é definida uma vez, no onboarding.** Ela marca o início do histórico: o que o corredor correu antes dessa data **não entra** na planilha (a linha 2 é o `Dia 1`). Alterá-la depois desloca o mapeamento data → linha e desalinha tudo que já foi gravado — para recomeçar, use uma cópia nova do template.
 
 Abas do modelo:
 
@@ -63,7 +63,7 @@ cp .env.example .env
 | `STRAVA_CLIENT_ID` | sim | Credenciais da aplicação — [strava.com/settings/api](https://www.strava.com/settings/api) |
 | `STRAVA_CLIENT_SECRET` | sim | |
 | `STRAVA_REFRESH_TOKEN` | sim | |
-| `START_DATE` | sim | Data do `Dia 1` da planilha (`YYYY-MM-DD`) |
+| `START_DATE` | sim | Data da primeira coleta do corredor = `Dia 1` da planilha (`YYYY-MM-DD`) |
 | `EXCEL_PATH` | não | Planilha do corredor (padrão `./data/corredor.xlsx`) |
 | `TEMPLATE_PATH` | não | Modelo base (padrão `./data/template.xlsx`) |
 | `LOG_LEVEL` | não | `DEBUG`…`CRITICAL` (padrão `INFO`) |
