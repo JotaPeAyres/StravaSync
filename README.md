@@ -19,7 +19,7 @@ A cada execução a aplicação consulta a API do Strava, identifica novas corri
 
 ## A planilha (uma por corredor)
 
-O arquivo base `Cópia de Planilha_carga_corrida.xlsx` é o **template**. O app é **single-athlete**: uma instância = um corredor = uma planilha.
+O arquivo base `Cópia de Planilha_carga_corrida.xlsx` é o **template**. O app é **single-athlete**: uma instância = um corredor = uma planilha. Como os participantes da pesquisa entram em datas diferentes, **cada corredor tem a sua própria `START_DATE`**.
 
 ### Onboarding de um corredor (passo manual)
 
@@ -27,13 +27,17 @@ O arquivo base `Cópia de Planilha_carga_corrida.xlsx` é o **template**. O app 
    ```bash
    cp "Cópia de Planilha_carga_corrida.xlsx" data/corredor.xlsx
    ```
-2. Aponte `EXCEL_PATH` no `.env` para essa cópia (e `TEMPLATE_PATH` para o modelo base).
-3. Defina `START_DATE` — a data da **primeira coleta de dados** desse corredor, que corresponde ao **`Dia 1`** (linha 2) da planilha.
+2. Aponte `EXCEL_PATH` no `.env` para essa cópia.
+3. Defina `START_DATE` — a **data de entrada desse corredor na pesquisa**, ou seja, o primeiro dia em que o projeto passa a buscar dados dele. É o **`Dia 1`** (linha 2) da planilha.
 4. Preencha as credenciais do Strava (`STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`).
 
 A partir daí o app preenche os dias de forma **contígua** (dias sem corrida recebem carga `0`), mapeando `dia = (data - START_DATE).days + 1` → `linha = dia + 1`.
 
-> ⚠️ **`START_DATE` é definida uma vez, no onboarding.** Ela marca o início do histórico: o que o corredor correu antes dessa data **não entra** na planilha (a linha 2 é o `Dia 1`). Alterá-la depois desloca o mapeamento data → linha e desalinha tudo que já foi gravado — para recomeçar, use uma cópia nova do template.
+> ⚠️ **`START_DATE` é um dado do estudo, definido uma vez.** Ela é registrada explicitamente por corredor — e não deduzida de quando o script rodou pela primeira vez, porque uma execução atrasada excluiria dias de coleta sem ninguém perceber. O que o corredor correu antes dela **não entra** na planilha.
+>
+> Ela pode estar no **futuro** (o corredor entra na pesquisa semana que vem, a config é feita hoje): enquanto esse dia não chega, não há o que sincronizar.
+>
+> Depois que a planilha tiver dados, a **célula `B2` é a fonte da verdade**: o app compara com o `.env` e **aborta se divergir**, em vez de reescrever a grade deslocada. Para recomeçar, use uma cópia nova do template.
 
 ### Adoção de uma planilha já preenchida à mão
 
@@ -41,7 +45,7 @@ Uma planilha que já vinha sendo preenchida manualmente **não** é recomeçada 
 
 | Data | Significado |
 |------|-------------|
-| `START_DATE` | O `Dia 1` da planilha — a data que está (ou deveria estar) na célula `B2` |
+| `START_DATE` | O `Dia 1` da planilha — a data que está na célula `B2` |
 | `CUTOVER_DATE` | O primeiro dia em que o app assume a escrita |
 
 Tudo **antes** da data de corte é território do corredor: o app lê para entender o histórico, mas nunca escreve. Da data de corte em diante, o app assume. Para um corredor novo as duas datas coincidem (e `CUTOVER_DATE` pode ficar vazia).
@@ -76,7 +80,7 @@ cp .env.example .env
 | `STRAVA_CLIENT_ID` | sim | Credenciais da aplicação — [strava.com/settings/api](https://www.strava.com/settings/api) |
 | `STRAVA_CLIENT_SECRET` | sim | |
 | `STRAVA_REFRESH_TOKEN` | sim | |
-| `START_DATE` | sim | Data da primeira coleta do corredor = `Dia 1` da planilha (`YYYY-MM-DD`) |
+| `START_DATE` | sim | Entrada do corredor na pesquisa = `Dia 1` da planilha (`YYYY-MM-DD`) |
 | `CUTOVER_DATE` | não | Primeiro dia em que o app escreve (padrão: `START_DATE`). Ver *Adoção* abaixo |
 | `EXCEL_PATH` | não | Planilha do corredor (padrão `./data/corredor.xlsx`) |
 | `TEMPLATE_PATH` | não | Modelo base (padrão: a planilha versionada na raiz do repo) |

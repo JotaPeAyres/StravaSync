@@ -27,9 +27,12 @@ Template: `Cópia de Planilha_carga_corrida.xlsx` (copiado por corredor). O app 
 - **`PACE`** (linhas 2–154): escreve **B (Data)**, **C (Carga Km)**, **D (PACE)**, **E (Tempo total)**.
 - **`Weekly_Desacoplado`** (linhas 2–53, 52 semanas) e **`Gráficos`**: só fórmulas / named ranges — **não escrever**.
 - **Dias contíguos**: `Dia 1` = `START_DATE`; preencher todos os dias; **dia sem corrida → Carga 0** (em `PACE`, Pace/Tempo em branco). Mapa: `dia = (data - START_DATE).days + 1` → `linha = dia + 1`.
-- **`START_DATE` = data da primeira coleta de dados do corredor** — o marco zero do histórico, não uma data qualquer. Consequências:
+- **`START_DATE` = data de entrada do corredor na pesquisa** = o primeiro dia em que o projeto passa a buscar dados dele. É **dado do estudo**, registrado explicitamente por corredor — nunca inferido de quando o script rodou pela primeira vez (uma execução atrasada excluiria dias de coleta em silêncio). Consequências:
   - O que o corredor correu **antes** dessa data está fora do escopo. A Fase 3 deve pedir ao Strava só o que interessa (`after=START_DATE` em `/athlete/activities`), e a Fase 6 deve descartar o que sobrar de mais antigo — `dia <= 0` cairia na linha 1 (cabeçalho) ou acima.
   - A grade também tem teto: `Daily_Data` vai até a linha 366 (365 dias) e `PACE` até a 154 (153 dias). Passado isso, a planilha do corredor acabou — decidir o que fazer (nova cópia? erro?) é assunto da Fase 5.
+  - **Depois da planilha gravada, a célula `B2` é a fonte da verdade**, não o `.env`. O app lê `B2` e, se o `.env` divergir, **aborta em vez de escrever** — editar a data no `.env` de uma planilha já preenchida deslocaria a grade inteira. O `.env` só faz o bootstrap da primeira execução.
+  - Pode estar no **futuro**: o corredor entra na pesquisa na semana que vem, a config é feita hoje. Enquanto `hoje < START_DATE` não há nada para sincronizar.
+- **Cada corredor da pesquisa = uma instância**: um `.env` (com a sua `START_DATE`) + uma planilha. Corredores entram em datas diferentes, então as `START_DATE` são diferentes entre si.
 - **Unidades (Strava → Excel)**: distância m → km; pace = tempo_total_dia ÷ km_dia (min/km); tempo total = Σ `moving_time`.
 
 ## Decisões travadas
@@ -87,5 +90,5 @@ Em nova branch `fase-3-strava` a partir da `main` (mergear a Fase 2 antes):
 - `utils/auth.py`: trocar o `refresh_token` por um access token, com renovação automática.
 - `api/strava_client.py`: cliente `httpx` — buscar atleta e atividades, paginação, tratamento de erros.
 - Filtrar apenas `type == "Run"`; mapear o JSON para `Activity` (atenção ao `start_date_local`).
-- Passar `after=START_DATE` (epoch) na busca de atividades: corridas anteriores à primeira coleta não entram na planilha, e filtrar na origem evita paginar o histórico inteiro do atleta.
+- Passar `after=` (epoch) na busca de atividades, para não paginar o histórico inteiro do atleta. **A data é `CUTOVER_DATE`, não `START_DATE`** — numa planilha adotada, o trecho entre as duas já foi preenchido à mão e o app não vai reescrevê-lo. Para corredor novo as duas coincidem.
 - Referência detalhada: `TASKS.md` › Fase 3.
