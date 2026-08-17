@@ -8,8 +8,9 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
 
 ## Estado atual
 
-- **Fase 1 (Estrutura): concluída e já na `main`** (a branch `fase-1-estrutura` está mergeada; pode ser apagada).
-- **Fase 2 (Configuração): concluída** na branch **`fase-2-configuracao`** — config em duas camadas (`.env` global + `corredores.toml`), logging central, modelos (`Activity`, `DailyLoad`, `Corredor`), 54 testes. Ainda não mergeada.
+- **Fase 1 (Estrutura): concluída e na `main`** (branch `fase-1-estrutura` mergeada; pode ser apagada).
+- **Fase 2 (Configuração): concluída e na `main`** — config em duas camadas (`.env` global + `corredores.toml`), logging central, modelos (`Activity`, `DailyLoad`, `Corredor`), 54 testes. Branch `fase-2-configuracao` mergeada; pode ser apagada.
+- A `main` local está **1 merge à frente do `origin/main`** — nada foi enviado ainda.
 - **Próxima: Fase 3 (Strava/OAuth)** — ver `TASKS.md`. Atenção ao **controle de vazão**: a pesquisa passa de 50 participantes e o limite do Strava é por aplicação.
 
 ## Convenções de trabalho (IMPORTANTE)
