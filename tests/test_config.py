@@ -15,6 +15,7 @@ VARIAVEIS = (
     "EXCEL_PATH",
     "TEMPLATE_PATH",
     "START_DATE",
+    "CUTOVER_DATE",
     "LOG_LEVEL",
     "LOG_FILE",
 )
@@ -88,6 +89,42 @@ def test_caminho_absoluto_e_preservado(monkeypatch, ambiente_limpo, env_inexiste
     config = load_config(env_file=env_inexistente)
 
     assert config.excel_path == planilha
+
+
+def test_cutover_sem_valor_e_a_propria_start_date(monkeypatch, ambiente_limpo, env_inexistente):
+    """Corredor novo: o app assume a planilha desde o Dia 1, sem histórico manual."""
+    _configurar(monkeypatch, **OBRIGATORIAS)
+
+    config = load_config(env_file=env_inexistente)
+
+    assert config.cutover_date == config.start_date
+    assert config.adota_planilha_existente is False
+
+
+def test_cutover_posterior_marca_adocao(monkeypatch, ambiente_limpo, env_inexistente):
+    """Planilha preenchida à mão: tudo antes do corte é território do corredor."""
+    _configurar(monkeypatch, **OBRIGATORIAS, CUTOVER_DATE="2026-06-01")
+
+    config = load_config(env_file=env_inexistente)
+
+    assert config.start_date == date(2026, 1, 1)
+    assert config.cutover_date == date(2026, 6, 1)
+    assert config.adota_planilha_existente is True
+
+
+def test_cutover_anterior_a_start_date_e_erro(monkeypatch, ambiente_limpo, env_inexistente):
+    """O corte não pode cair fora da planilha (linha < 2)."""
+    _configurar(monkeypatch, **OBRIGATORIAS, CUTOVER_DATE="2025-12-31")
+
+    with pytest.raises(ConfigError, match="CUTOVER_DATE"):
+        load_config(env_file=env_inexistente)
+
+
+def test_cutover_invalida(monkeypatch, ambiente_limpo, env_inexistente):
+    _configurar(monkeypatch, **OBRIGATORIAS, CUTOVER_DATE="junho de 2026")
+
+    with pytest.raises(ConfigError, match="YYYY-MM-DD"):
+        load_config(env_file=env_inexistente)
 
 
 def test_log_file_vazio_desliga_arquivo(monkeypatch, ambiente_limpo, env_inexistente):
@@ -170,6 +207,7 @@ def test_segredos_nao_aparecem_no_repr():
         excel_path=Path("corredor.xlsx"),
         template_path=Path("template.xlsx"),
         start_date=date(2026, 1, 1),
+        cutover_date=date(2026, 1, 1),
     )
 
     texto = repr(config)
@@ -185,6 +223,7 @@ def test_safe_summary_mascara_o_client_id():
         excel_path=Path("corredor.xlsx"),
         template_path=Path("template.xlsx"),
         start_date=date(2026, 1, 1),
+        cutover_date=date(2026, 1, 1),
     )
 
     resumo = config.safe_summary()

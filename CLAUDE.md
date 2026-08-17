@@ -25,7 +25,7 @@ Template: `Cópia de Planilha_carga_corrida.xlsx` (copiado por corredor). O app 
 
 - **`Daily_Data`** (1 linha/dia, linhas 2–366): escreve **B (Data)** e **C (Carga diária Km)**. Colunas D–J são fórmulas (EWMA agudo 7d, EWMA crônico 28d, ACWR, maior corrida 30d, razão sessão-específica, limites 0.8/1.3).
 - **`PACE`** (linhas 2–154): escreve **B (Data)**, **C (Carga Km)**, **D (PACE)**, **E (Tempo total)**.
-- **`Weekly_Desacoplado`** e **`Gráficos`**: só fórmulas / named ranges — **não escrever**.
+- **`Weekly_Desacoplado`** (linhas 2–53, 52 semanas) e **`Gráficos`**: só fórmulas / named ranges — **não escrever**.
 - **Dias contíguos**: `Dia 1` = `START_DATE`; preencher todos os dias; **dia sem corrida → Carga 0** (em `PACE`, Pace/Tempo em branco). Mapa: `dia = (data - START_DATE).days + 1` → `linha = dia + 1`.
 - **`START_DATE` = data da primeira coleta de dados do corredor** — o marco zero do histórico, não uma data qualquer. Consequências:
   - O que o corredor correu **antes** dessa data está fora do escopo. A Fase 3 deve pedir ao Strava só o que interessa (`after=START_DATE` em `/athlete/activities`), e a Fase 6 deve descartar o que sobrar de mais antigo — `dia <= 0` cairia na linha 1 (cabeçalho) ou acima.
@@ -35,6 +35,11 @@ Template: `Cópia de Planilha_carga_corrida.xlsx` (copiado por corredor). O app 
 ## Decisões travadas
 
 - **Single-athlete**: 1 conjunto de credenciais, 1 planilha. Onboarding de novo corredor = copiar o template + definir `START_DATE` (passo manual), sendo `START_DATE` a data em que a coleta daquele corredor começa.
+- **Planilhas preenchidas à mão são adotadas, não recomeçadas** (ver Fase 5.5 no `TASKS.md`). Duas datas governam isso:
+  - `START_DATE` = o `Dia 1` (célula `B2`); `CUTOVER_DATE` = o primeiro dia em que o app escreve. Corredor novo: as duas coincidem.
+  - **Antes do corte o app nunca escreve** — só lê, para conhecer o histórico. Depois do corte, ele assume.
+  - **Problema que isso cria**: o dedupe é por `activity_id`, mas linha preenchida à mão **não tem ID** — o SQLite não sabe que o dia já foi contabilizado, e a mesma corrida existe na planilha e na API. Daí o corte: ele define, por data, de quem é cada linha.
+  - **Edição manual continua possível depois do corte** (esteira, treino sem relógio), mas é exceção. O app guarda o valor que escreveu em cada dia; se encontrar valor diferente, trata como edição humana — **preserva e loga**, não sobrescreve.
 - **Excel só carga/ACWR/PACE**; dados ricos (FC, cadência, elevação, Activity ID, tipo, velocidade) ficam **só no SQLite**.
 - Modelos: `Activity` (por atividade, SQLite) e `DailyLoad` (agregado por dia, Excel).
 - Lib Excel: **openpyxl** (ok hoje, pois `Gráficos` está vazia). ⚠️ Se adicionarem gráficos ao template, o openpyxl os apaga ao reescrever — reavaliar então.
@@ -58,7 +63,7 @@ data/             # .gitkeep; *.db, *.xlsx e *.log de runtime são ignorados
 
 ## Configuração e logging (Fase 2 — já implementados)
 
-- **`utils/config.py`**: `load_config()` → `Config` congelado. Obrigatórias: as 3 credenciais do Strava + `START_DATE`. Opcionais com padrão: `EXCEL_PATH`, `TEMPLATE_PATH`, `LOG_LEVEL`, `LOG_FILE`.
+- **`utils/config.py`**: `load_config()` → `Config` congelado. Obrigatórias: as 3 credenciais do Strava + `START_DATE`. Opcionais com padrão: `CUTOVER_DATE` (padrão = `START_DATE`), `EXCEL_PATH`, `TEMPLATE_PATH`, `LOG_LEVEL`, `LOG_FILE`. `config.adota_planilha_existente` diz se há histórico manual antes do corte.
   - Erros são **acumulados** e levantados de uma vez em `ConfigError` — nada de corrigir o `.env` uma variável por vez.
   - **Caminhos relativos partem de `PROJECT_ROOT`**, não do CWD (o scheduler da Fase 7 pode rodar de qualquer lugar).
   - O ambiente tem precedência sobre o `.env` (permite sobrescrever em CI/agendador).

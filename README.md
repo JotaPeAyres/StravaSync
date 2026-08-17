@@ -35,6 +35,19 @@ A partir daí o app preenche os dias de forma **contígua** (dias sem corrida re
 
 > ⚠️ **`START_DATE` é definida uma vez, no onboarding.** Ela marca o início do histórico: o que o corredor correu antes dessa data **não entra** na planilha (a linha 2 é o `Dia 1`). Alterá-la depois desloca o mapeamento data → linha e desalinha tudo que já foi gravado — para recomeçar, use uma cópia nova do template.
 
+### Adoção de uma planilha já preenchida à mão
+
+Uma planilha que já vinha sendo preenchida manualmente **não** é recomeçada do zero. Nesse caso valem duas datas:
+
+| Data | Significado |
+|------|-------------|
+| `START_DATE` | O `Dia 1` da planilha — a data que está (ou deveria estar) na célula `B2` |
+| `CUTOVER_DATE` | O primeiro dia em que o app assume a escrita |
+
+Tudo **antes** da data de corte é território do corredor: o app lê para entender o histórico, mas nunca escreve. Da data de corte em diante, o app assume. Para um corredor novo as duas datas coincidem (e `CUTOVER_DATE` pode ficar vazia).
+
+O preenchimento manual continua possível depois do corte, para exceções (esteira, treino sem relógio). Como o app registra o que escreveu em cada dia, um valor que ele não reconhece é tratado como edição manual: em vez de sobrescrever, ele preserva e registra no log.
+
 Abas do modelo:
 
 | Aba | Conteúdo | O app escreve |
@@ -64,6 +77,7 @@ cp .env.example .env
 | `STRAVA_CLIENT_SECRET` | sim | |
 | `STRAVA_REFRESH_TOKEN` | sim | |
 | `START_DATE` | sim | Data da primeira coleta do corredor = `Dia 1` da planilha (`YYYY-MM-DD`) |
+| `CUTOVER_DATE` | não | Primeiro dia em que o app escreve (padrão: `START_DATE`). Ver *Adoção* abaixo |
 | `EXCEL_PATH` | não | Planilha do corredor (padrão `./data/corredor.xlsx`) |
 | `TEMPLATE_PATH` | não | Modelo base (padrão `./data/template.xlsx`) |
 | `LOG_LEVEL` | não | `DEBUG`…`CRITICAL` (padrão `INFO`) |

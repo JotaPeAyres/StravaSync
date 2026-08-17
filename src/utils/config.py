@@ -46,9 +46,15 @@ class Config:
     excel_path: Path
     template_path: Path
     start_date: date
+    cutover_date: date
 
     log_level: str = DEFAULT_LOG_LEVEL
     log_file: Path | None = None
+
+    @property
+    def adota_planilha_existente(self) -> bool:
+        """True quando há histórico manual anterior ao corte, a ser preservado."""
+        return self.cutover_date > self.start_date
 
     def safe_summary(self) -> str:
         """Resumo de uma linha para o log de inicialização, com segredos mascarados."""
@@ -57,6 +63,7 @@ class Config:
             f"excel={self.excel_path} "
             f"template={self.template_path} "
             f"start_date={self.start_date.isoformat()} "
+            f"cutover={self.cutover_date.isoformat()} "
             f"log_level={self.log_level} "
             f"log_file={self.log_file or '(desativado)'}"
         )
@@ -79,6 +86,13 @@ def load_config(env_file: Path | None = None) -> Config:
     client_secret = _obrigatorio("STRAVA_CLIENT_SECRET", erros)
     refresh_token = _obrigatorio("STRAVA_REFRESH_TOKEN", erros)
     start_date = _data("START_DATE", erros)
+    # Sem CUTOVER_DATE o app assume a planilha desde o Dia 1 (corredor novo).
+    cutover_date = _data_opcional("CUTOVER_DATE", start_date, erros)
+    if cutover_date < start_date:
+        erros.append(
+            f"CUTOVER_DATE={cutover_date.isoformat()} é anterior a "
+            f"START_DATE={start_date.isoformat()} (o corte não pode ficar fora da planilha)"
+        )
     log_level = _nivel_de_log("LOG_LEVEL", erros)
 
     excel_path = _caminho(os.getenv("EXCEL_PATH") or DEFAULT_EXCEL_PATH)
@@ -102,6 +116,7 @@ def load_config(env_file: Path | None = None) -> Config:
         excel_path=excel_path,
         template_path=template_path,
         start_date=start_date,
+        cutover_date=cutover_date,
         log_level=log_level,
         log_file=log_file,
     )
@@ -125,6 +140,18 @@ def _data(nome: str, erros: list[str]) -> date:
     except ValueError:
         erros.append(f"{nome}={valor!r} não é uma data no formato YYYY-MM-DD")
         return date.min
+
+
+def _data_opcional(nome: str, padrao: date, erros: list[str]) -> date:
+    """Como `_data`, mas cai no `padrao` quando a variável não é definida."""
+    valor = (os.getenv(nome) or "").strip()
+    if not valor:
+        return padrao
+    try:
+        return date.fromisoformat(valor)
+    except ValueError:
+        erros.append(f"{nome}={valor!r} não é uma data no formato YYYY-MM-DD")
+        return padrao
 
 
 def _nivel_de_log(nome: str, erros: list[str]) -> str:
