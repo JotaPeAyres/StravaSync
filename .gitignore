@@ -15,6 +15,8 @@ venv/
 
 # Ambiente e segredos
 .env
+# Cadastro dos participantes: contém os refresh_tokens de cada corredor
+corredores.toml
 
 # Dados de runtime (a planilha-template versionada fica na raiz do repo)
 data/*.db

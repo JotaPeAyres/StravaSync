@@ -1,0 +1,30 @@
+# Cadastro dos participantes da pesquisa.
+#
+# Copie para `corredores.toml` (que fica fora do versionamento, por conter
+# tokens) e cadastre um bloco [[corredor]] por participante.
+#
+# O `refresh_token` aqui é o INICIAL, obtido quando o participante autoriza o
+# app no Strava. O token corrente fica no SQLite: o Strava pode devolver um
+# token novo a cada renovação, e o app não reescreve este arquivo.
+
+[[corredor]]
+id = "p001"                          # identificador na pesquisa; precisa ser único
+nome = "Participante 001"            # opcional, só para o log (padrão: o id)
+refresh_token = "cole-aqui-o-token-do-participante"
+start_date = 2026-01-01              # entrada na pesquisa = "Dia 1" da planilha
+excel_path = "./data/p001.xlsx"      # opcional (padrão: ./data/<id>.xlsx); único por corredor
+
+[[corredor]]
+id = "p002"
+nome = "Participante 002"
+refresh_token = "cole-aqui-o-token-do-participante"
+start_date = 2026-02-15
+
+# Participante que já vinha preenchendo a planilha à mão: o app assume só a
+# partir de cutover_date, e nunca reescreve o que veio antes.
+[[corredor]]
+id = "p003"
+nome = "Participante 003"
+refresh_token = "cole-aqui-o-token-do-participante"
+start_date = 2025-11-01
+cutover_date = 2026-03-01
