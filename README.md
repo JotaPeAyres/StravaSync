@@ -79,7 +79,7 @@ cp .env.example .env
 | `START_DATE` | sim | Data da primeira coleta do corredor = `Dia 1` da planilha (`YYYY-MM-DD`) |
 | `CUTOVER_DATE` | não | Primeiro dia em que o app escreve (padrão: `START_DATE`). Ver *Adoção* abaixo |
 | `EXCEL_PATH` | não | Planilha do corredor (padrão `./data/corredor.xlsx`) |
-| `TEMPLATE_PATH` | não | Modelo base (padrão `./data/template.xlsx`) |
+| `TEMPLATE_PATH` | não | Modelo base (padrão: a planilha versionada na raiz do repo) |
 | `LOG_LEVEL` | não | `DEBUG`…`CRITICAL` (padrão `INFO`) |
 | `LOG_FILE` | não | Log rotativo (padrão `./data/stravasync.log`); vazio = só console |
 

@@ -23,7 +23,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Caminhos relativos no .env são resolvidos a partir da raiz do projeto, e não do
 # diretório de trabalho — o scheduler (Fase 7) pode executar de qualquer lugar.
 DEFAULT_EXCEL_PATH = "./data/corredor.xlsx"
-DEFAULT_TEMPLATE_PATH = "./data/template.xlsx"
+# O template versionado fica na raiz do repo; só a cópia do corredor vai para
+# data/ (que é ignorada pelo git).
+DEFAULT_TEMPLATE_PATH = "./Cópia de Planilha_carga_corrida.xlsx"
 DEFAULT_LOG_FILE = "./data/stravasync.log"
 DEFAULT_LOG_LEVEL = "INFO"
 

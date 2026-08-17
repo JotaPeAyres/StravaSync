@@ -66,8 +66,10 @@ def test_caminhos_tem_padrao_e_saem_da_raiz_do_projeto(
     config = load_config(env_file=env_inexistente)
 
     assert config.excel_path == PROJECT_ROOT / "data" / "corredor.xlsx"
-    assert config.template_path == PROJECT_ROOT / "data" / "template.xlsx"
     assert config.log_file == PROJECT_ROOT / "data" / "stravasync.log"
+    # O template padrão é o arquivo versionado na raiz — precisa existir de fato.
+    assert config.template_path == PROJECT_ROOT / "Cópia de Planilha_carga_corrida.xlsx"
+    assert config.template_path.is_file()
 
 
 def test_caminho_relativo_nao_depende_do_diretorio_atual(
