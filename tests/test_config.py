@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 
 from src.models.corredor import Corredor
-from src.utils.config import PROJECT_ROOT, Config, ConfigError, load_config
+from src.utils.config import (
+    DEFAULT_PAUSA_S,
+    DEFAULT_RESERVA,
+    DEFAULT_TIMEOUT_S,
+    PROJECT_ROOT,
+    Config,
+    ConfigError,
+    load_config,
+)
 
 VARIAVEIS = (
     "STRAVA_CLIENT_ID",
@@ -17,6 +25,9 @@ VARIAVEIS = (
     "DATABASE_PATH",
     "LOG_LEVEL",
     "LOG_FILE",
+    "STRAVA_TIMEOUT_S",
+    "STRAVA_PAUSA_ENTRE_CHAMADAS_S",
+    "STRAVA_RESERVA_DE_VAZAO",
 )
 
 CREDENCIAIS = {
@@ -356,6 +367,57 @@ def test_safe_summary_mascara_e_conta_corredores(monkeypatch, ambiente_limpo, tm
     assert "1234567890" not in resumo
     assert "****7890" in resumo
     assert "corredores=1" in resumo
+    # A vazão sai no resumo: é o parâmetro que o operador mais precisa conferir
+    # quando a pesquisa cresce e a cota da aplicação começa a apertar.
+    assert "pausa=" in resumo
+    assert "reserva=" in resumo
+
+
+def test_vazao_tem_padroes(monkeypatch, ambiente_limpo, tmp_path):
+    """Sem nada no `.env`, o app já roda com um ritmo seguro."""
+    config = _carregar(monkeypatch, tmp_path)
+
+    assert config.strava_timeout_s == DEFAULT_TIMEOUT_S
+    assert config.strava_pausa_entre_chamadas_s == DEFAULT_PAUSA_S
+    assert config.strava_reserva_de_vazao == DEFAULT_RESERVA
+
+
+def test_vazao_pode_ser_ajustada_pelo_ambiente(monkeypatch, ambiente_limpo, tmp_path):
+    """Desacelerar quando entram mais participantes não pode exigir nova versão."""
+    config = _carregar(
+        monkeypatch,
+        tmp_path,
+        STRAVA_TIMEOUT_S="45.5",
+        STRAVA_PAUSA_ENTRE_CHAMADAS_S="2.5",
+        STRAVA_RESERVA_DE_VAZAO="25",
+    )
+
+    assert config.strava_timeout_s == 45.5
+    assert config.strava_pausa_entre_chamadas_s == 2.5
+    assert config.strava_reserva_de_vazao == 25
+    assert isinstance(config.strava_reserva_de_vazao, int)
+
+
+def test_pausa_zero_e_valida(monkeypatch, ambiente_limpo, tmp_path):
+    """Zero desliga a pausa — é o que os testes e uma execução com 1 corredor usam."""
+    config = _carregar(monkeypatch, tmp_path, STRAVA_PAUSA_ENTRE_CHAMADAS_S="0")
+
+    assert config.strava_pausa_entre_chamadas_s == 0
+
+
+@pytest.mark.parametrize(
+    ("variavel", "valor"),
+    [
+        ("STRAVA_TIMEOUT_S", "rápido"),
+        ("STRAVA_TIMEOUT_S", "0.1"),          # abaixo do mínimo: rede lenta viraria falha
+        ("STRAVA_PAUSA_ENTRE_CHAMADAS_S", "-1"),
+        ("STRAVA_RESERVA_DE_VAZAO", "2.5"),   # reserva é contagem de requisições
+        ("STRAVA_RESERVA_DE_VAZAO", "500"),   # não sobraria cota nenhuma
+    ],
+)
+def test_vazao_invalida_e_erro(monkeypatch, ambiente_limpo, tmp_path, variavel, valor):
+    with pytest.raises(ConfigError, match=variavel):
+        _carregar(monkeypatch, tmp_path, **{variavel: valor})
 
 
 def test_corredor_mapeia_data_para_dia():

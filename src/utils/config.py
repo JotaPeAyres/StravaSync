@@ -28,6 +28,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.models.corredor import Corredor
+from src.utils.errors import StravaSyncError
 
 # Raiz do repositório (src/utils/config.py -> src/utils -> src -> raiz).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,19 @@ DEFAULT_TEMPLATE_PATH = "./Cópia de Planilha_carga_corrida.xlsx"
 DEFAULT_DATABASE_PATH = "./data/stravasync.db"
 DEFAULT_LOG_FILE = "./data/stravasync.log"
 DEFAULT_LOG_LEVEL = "INFO"
+
+# Parâmetros de vazão. O limite do Strava é por APLICAÇÃO (100 req/15min,
+# 1000/dia) e é dividido por todos os participantes — com a pesquisa crescendo,
+# o operador precisa poder desacelerar sem esperar uma nova versão do código.
+DEFAULT_TIMEOUT_S = 20.0
+DEFAULT_PAUSA_S = 1.0
+DEFAULT_RESERVA = 10
+
+# Um timeout muito curto transforma rede lenta em falha do participante.
+TIMEOUT_MINIMO_S = 1.0
+# A reserva é o quanto da janela de 15 min fica intocado; acima disso não
+# sobraria cota nenhuma para a execução.
+RESERVA_MAXIMA = 90
 
 _NIVEIS_DE_LOG = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
 
@@ -52,8 +66,12 @@ _CAMPOS_CONHECIDOS = {
 }
 
 
-class ConfigError(RuntimeError):
-    """Configuração ausente ou inválida — o app não tem como seguir."""
+class ConfigError(StravaSyncError):
+    """Configuração ausente ou inválida — o app não tem como seguir.
+
+    `StravaSyncError` herda de `RuntimeError`, então quem já capturava
+    `RuntimeError` continua funcionando.
+    """
 
 
 @dataclass(frozen=True)
@@ -72,15 +90,24 @@ class Config:
     log_level: str = DEFAULT_LOG_LEVEL
     log_file: Path | None = None
 
+    # Vazão: campos novos entram sempre no fim, senão o dataclass não compila
+    # (campo com padrão não pode preceder campo sem padrão).
+    strava_timeout_s: float = DEFAULT_TIMEOUT_S
+    strava_pausa_entre_chamadas_s: float = DEFAULT_PAUSA_S
+    strava_reserva_de_vazao: int = DEFAULT_RESERVA
+
     def safe_summary(self) -> str:
         """Resumo de uma linha para o log de inicialização, com segredos mascarados."""
         return (
-            f"client_id={_mascarar(self.strava_client_id)} "
+            f"client_id={mascarar(self.strava_client_id)} "
             f"corredores={len(self.corredores)} "
             f"template={self.template_path} "
             f"banco={self.database_path} "
             f"log_level={self.log_level} "
-            f"log_file={self.log_file or '(desativado)'}"
+            f"log_file={self.log_file or '(desativado)'} "
+            f"timeout={self.strava_timeout_s}s "
+            f"pausa={self.strava_pausa_entre_chamadas_s}s "
+            f"reserva={self.strava_reserva_de_vazao}"
         )
 
 
@@ -108,6 +135,17 @@ def load_config(env_file: Path | None = None, corredores_file: Path | None = Non
     log_file_bruto = os.getenv("LOG_FILE", DEFAULT_LOG_FILE).strip()
     log_file = _caminho(log_file_bruto) if log_file_bruto else None
 
+    timeout_s = _numero("STRAVA_TIMEOUT_S", DEFAULT_TIMEOUT_S, erros, minimo=TIMEOUT_MINIMO_S)
+    pausa_s = _numero("STRAVA_PAUSA_ENTRE_CHAMADAS_S", DEFAULT_PAUSA_S, erros, minimo=0.0)
+    reserva = _numero(
+        "STRAVA_RESERVA_DE_VAZAO",
+        DEFAULT_RESERVA,
+        erros,
+        minimo=0.0,
+        maximo=RESERVA_MAXIMA,
+        inteiro=True,
+    )
+
     cadastro = corredores_file or _caminho(
         os.getenv("CORREDORES_PATH") or DEFAULT_CORREDORES_PATH
     )
@@ -128,6 +166,9 @@ def load_config(env_file: Path | None = None, corredores_file: Path | None = Non
         corredores=corredores,
         log_level=log_level,
         log_file=log_file,
+        strava_timeout_s=timeout_s,
+        strava_pausa_entre_chamadas_s=pausa_s,
+        strava_reserva_de_vazao=int(reserva),
     )
 
 
@@ -256,6 +297,40 @@ def _nivel_de_log(nome: str, erros: list[str]) -> str:
     return valor
 
 
+def _numero(
+    nome: str,
+    padrao: float,
+    erros: list[str],
+    *,
+    minimo: float,
+    maximo: float | None = None,
+    inteiro: bool = False,
+) -> float:
+    """Lê um número do ambiente, acumulando erro em vez de levantar na hora.
+
+    Segue o padrão do `_nivel_de_log`: quando o valor é inválido, devolve o
+    padrão para que a validação continue e o usuário veja todos os problemas de
+    uma vez.
+    """
+    bruto = (os.getenv(nome) or "").strip()
+    if not bruto:
+        return padrao
+
+    try:
+        valor = float(int(bruto) if inteiro else float(bruto))
+    except ValueError:
+        tipo = "um número inteiro" if inteiro else "um número"
+        erros.append(f"{nome}={bruto!r} não é {tipo}")
+        return padrao
+
+    if valor < minimo or (maximo is not None and valor > maximo):
+        faixa = f"maior ou igual a {minimo}" if maximo is None else f"entre {minimo} e {maximo}"
+        erros.append(f"{nome}={bruto!r} fora da faixa aceita ({faixa})")
+        return padrao
+
+    return valor
+
+
 def _caminho(valor: str) -> Path:
     """Resolve um caminho de configuração; relativos partem da raiz do projeto."""
     caminho = Path(valor.strip()).expanduser()
@@ -264,8 +339,12 @@ def _caminho(valor: str) -> Path:
     return Path(os.path.normpath(caminho))
 
 
-def _mascarar(segredo: str) -> str:
-    """Mostra apenas os últimos 4 caracteres de um segredo."""
-    if len(segredo) <= 4:
+def mascarar(segredo: str) -> str:
+    """Mostra apenas os últimos 4 caracteres de um segredo.
+
+    Público porque o CLI de inscrição e os logs de token precisam do mesmo
+    tratamento — duas implementações divergentes vazariam mais cedo ou mais tarde.
+    """
+    if not segredo or len(segredo) <= 4:
         return "****"
     return f"****{segredo[-4:]}"

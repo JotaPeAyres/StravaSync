@@ -3,9 +3,18 @@
 # Copie para `corredores.toml` (que fica fora do versionamento, por conter
 # tokens) e cadastre um bloco [[corredor]] por participante.
 #
-# O `refresh_token` aqui é o INICIAL, obtido quando o participante autoriza o
-# app no Strava. O token corrente fica no SQLite: o Strava pode devolver um
-# token novo a cada renovação, e o app não reescreve este arquivo.
+# O `refresh_token` aqui é o INICIAL. O token corrente fica no SQLite: o Strava
+# pode devolver um token novo a cada renovação, e o app não reescreve este
+# arquivo.
+#
+# Cadastre o participante ANTES de ele autorizar — é preciso ter o `id` para
+# gerar o link. Deixe o valor abaixo como está até lá:
+#
+#   python -m src.inscricao link p001      # envie o link ao participante
+#   python -m src.inscricao trocar "<url que ele devolveu>"
+#
+# Depois da inscrição, mudar o `refresh_token` aqui não tem mais efeito: quem
+# manda é o SQLite. Para trocar o token, reinscreva com o comando `trocar`.
 
 [[corredor]]
 id = "p001"                          # identificador na pesquisa; precisa ser único

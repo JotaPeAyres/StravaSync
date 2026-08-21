@@ -6,7 +6,7 @@ A cada execução a aplicação percorre **todos os participantes cadastrados**:
 
 Cada participante entra no estudo numa data própria e tem a sua planilha; a falha de um (token expirado, planilha aberta no Excel) é registrada e **não interrompe a coleta dos demais**.
 
-> **Status:** em desenvolvimento. A estrutura em camadas (Fase 1) e a configuração/logging (Fase 2) estão prontas; a integração com o Strava, o banco e o Excel (Fases 3–6) ainda não. Veja o backlog em `TASKS.md`.
+> **Status:** em desenvolvimento. Estrutura em camadas (Fase 1), configuração/logging (Fase 2) e integração com o Strava — OAuth, cliente da API e controle de vazão (Fase 3) — estão prontas. O banco de atividades, o Excel e a orquestração (Fases 4–6) ainda não. Veja o backlog em `TASKS.md`.
 
 ---
 
@@ -34,9 +34,11 @@ O arquivo base `Cópia de Planilha_carga_corrida.xlsx` é o **template**: cada p
    [[corredor]]
    id = "p001"
    nome = "Participante 001"
-   refresh_token = "token-obtido-quando-o-participante-autorizou-o-app"
+   refresh_token = "cole-aqui-o-token-do-participante"
    start_date = 2026-01-01
    ```
+3. Peça a autorização do participante (abaixo). O token real fica no SQLite; o
+   valor do TOML é só o de partida.
 
 O `excel_path` é opcional: sem ele, o app usa `./data/<id>.xlsx`. A partir daí os dias são preenchidos de forma **contígua** (dias sem corrida recebem carga `0`), mapeando `dia = (data - start_date).days + 1` → `linha = dia + 1`.
 
@@ -45,6 +47,42 @@ O `excel_path` é opcional: sem ele, o app usa `./data/<id>.xlsx`. A partir daí
 > Ela pode estar no **futuro** (o participante entra na pesquisa semana que vem, o cadastro é feito hoje): enquanto esse dia não chega, não há o que sincronizar.
 >
 > Depois que a planilha tiver dados, a **célula `B2` é a fonte da verdade**: o app compara com o cadastro e **aborta aquele corredor se divergir**, em vez de reescrever a grade deslocada. Para recomeçar, use uma cópia nova do template.
+
+### Inscrever um participante (autorização no Strava)
+
+A inscrição é **manual**: não há servidor nem página hospedada. O participante
+abre um link, aprova, e devolve a URL que ficou na barra de endereço.
+
+1. Gere o link:
+   ```bash
+   uv run python -m src.inscricao link p001
+   ```
+2. Envie o link. Ao aprovar, o navegador tenta abrir `http://localhost/...` e a
+   **página não carrega** — isso é esperado. Peça a **URL inteira** da barra de
+   endereço.
+3. Troque pelo token:
+   ```bash
+   uv run python -m src.inscricao trocar "http://localhost/exchange_token?state=p001&code=...&scope=..."
+   ```
+4. Confira quem já está inscrito (sai com código 1 se faltar alguém):
+   ```bash
+   uv run python -m src.inscricao estado
+   ```
+
+> ⚠️ **O `code` é de uso único e de vida curta.** Como ele viaja por mensagem
+> até você, rode o `trocar` assim que a URL chegar; se expirar, o erro diz para
+> gerar um link novo.
+>
+> **Peça a URL inteira, não só o `code`.** A tela de consentimento do Strava tem
+> caixas de seleção: o participante pode aprovar e desmarcar o acesso às
+> atividades privadas. O escopo concedido **não vem** na resposta da troca — ele
+> aparece só na URL de retorno. Por isso, colar apenas o `code` é recusado (há
+> `--sem-verificar-escopo` para forçar, mas aí o problema só apareceria numa
+> coleta vazia meses depois).
+>
+> **Depois da primeira renovação bem-sucedida, editar o `refresh_token` no
+> `corredores.toml` não tem efeito nenhum** — o token corrente passa a vir do
+> SQLite. Para trocar, reinscreva com o comando `trocar`.
 
 ### Adoção de uma planilha já preenchida à mão
 
@@ -99,6 +137,9 @@ As credenciais são do **app registrado no Strava** para a pesquisa inteira, e v
 | `DATABASE_PATH` | não | Banco SQLite (padrão `./data/stravasync.db`) |
 | `LOG_LEVEL` | não | `DEBUG`…`CRITICAL` (padrão `INFO`) |
 | `LOG_FILE` | não | Log rotativo (padrão `./data/stravasync.log`); vazio = só console |
+| `STRAVA_TIMEOUT_S` | não | Timeout de cada requisição, em segundos (padrão `20`, mínimo `1`) |
+| `STRAVA_PAUSA_ENTRE_CHAMADAS_S` | não | Pausa mínima entre chamadas (padrão `1`) — o botão para desacelerar quando a pesquisa cresce |
+| `STRAVA_RESERVA_DE_VAZAO` | não | Folga guardada na janela de 15 min (padrão `10`), para uma inscrição manual não esbarrar no teto |
 
 ### `corredores.toml` — o que pertence a cada participante
 
@@ -119,7 +160,9 @@ Caminhos relativos são resolvidos a partir da **raiz do projeto**, não do dire
 
 Se algo estiver faltando ou inválido, o app aborta na inicialização listando **todas** as pendências de uma vez, identificando o corredor em cada uma — com dezenas de participantes, corrigir um erro por execução seria inviável.
 
-> ⚠️ **Limite de requisições.** O teto do Strava é **por aplicação** (padrão: 100 requisições/15 min, 1000/dia) e é dividido por todos os participantes da pesquisa. A partir de algumas dezenas de corredores, a coleta precisa de controle de vazão e sincronização incremental — está previsto na Fase 3.
+> ⚠️ **Limite de requisições.** O teto do Strava é **por aplicação** (padrão: 100 requisições/15 min, 1000/dia) e é dividido por todos os participantes da pesquisa. O app espaça as chamadas, lê o uso corrente nos cabeçalhos de cada resposta e respeita o `429`. Ao bater a janela de 15 minutos ele **espera** a virada; ao esgotar a cota diária ele **encerra** a execução, deixando os corredores restantes para a próxima — dormir horas num job agendado seria pior. Ajuste `STRAVA_PAUSA_ENTRE_CHAMADAS_S` quando a pesquisa crescer.
+>
+> Registre **um único app** no Strava para o estudo inteiro, com *Authorization Callback Domain* = `localhost`. Um segundo `client_id` invalidaria de uma vez os tokens de todos os participantes.
 
 ## Como rodar
 

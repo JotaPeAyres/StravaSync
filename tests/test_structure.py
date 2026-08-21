@@ -7,15 +7,19 @@ import pytest
 
 MODULOS = (
     "src.main",
+    "src.inscricao",
     "src.scheduler",
+    "src.api.rate_limiter",
     "src.api.strava_client",
     "src.services.activity_service",
     "src.services.sync_service",
     "src.services.excel_service",
     "src.services.database_service",
     "src.repositories.activity_repository",
+    "src.repositories.corredor_state_repository",
     "src.utils.auth",
     "src.utils.config",
+    "src.utils.errors",
     "src.utils.logger",
 )
 
