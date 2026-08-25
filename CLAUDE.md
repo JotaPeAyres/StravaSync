@@ -11,9 +11,10 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
 - **Fase 1 (Estrutura): concluída e na `main`** (branch `fase-1-estrutura` mergeada; pode ser apagada).
 - **Fase 2 (Configuração): concluída e na `main`** — config em duas camadas (`.env` global + `corredores.toml`), logging central, modelos (`Activity`, `DailyLoad`, `Corredor`), 54 testes. Branch `fase-2-configuracao` mergeada; pode ser apagada.
 - **Fase 3 (Strava): implementada na branch `fase-3-strava`**, ainda **não mergeada**. Entrega: hierarquia de exceções, tabela de estado por corredor no SQLite, `RateLimiter`, `StravaClient`, política OAuth (`utils/auth.py`), filtro/conversão de atividades e a CLI `src/inscricao.py`. 197 testes, tudo com `httpx.MockTransport` — **nenhuma credencial real foi usada**.
+- **Fase 4 (Banco): implementada na branch `fase-4-banco`** (criada a partir de `fase-3-strava`, já que a Fase 3 não foi mergeada). Entrega: schema v2 com `activities`, `ActivityRepository` com upsert, consultas por período e a marca d'água do `after=`. 238 testes.
 - A `main` local está **1 merge à frente do `origin/main`** — nada foi enviado ainda.
-- **Pendência bloqueante para validar a Fase 3 de verdade**: registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios.
-- **Próxima: Fase 4 (Banco)** — o schema já está na versão 1 com `corredor_state`; falta a tabela `activities` (schema v2) e o `ActivityRepository`.
+- **Pendência bloqueante para validar as Fases 3 e 4 de verdade**: registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — a Fase 5 (Excel) também é local.
+- **Próxima: Fase 5 (Excel)** — `ExcelService` com openpyxl, escrevendo só as células de entrada.
 
 ## Convenções de trabalho (IMPORTANTE)
 
@@ -73,7 +74,8 @@ src/
   services/excel_service.py            # Fase 5 (escreve entradas, preserva fórmulas)
   services/database_service.py         # ✅ Fase 3 (schema v1) — v2 na Fase 4
   models/activity.py, models/daily_load.py, models/corredor.py ✅
-  repositories/activity_repository.py  # Fase 4
+  repositories/activity_repository.py  # ✅ Fase 4
+  repositories/corredor_state_repository.py  # ✅ Fase 3
   utils/config.py ✅, logger.py ✅, auth.py (Fase 3)
   main.py (executável), scheduler.py   # Fase 7
 tests/            # pytest
@@ -164,3 +166,84 @@ por corredor: marcado precisa_reinscricao? → WARNING e pula (0 requisições)
 - **`VirtualRun` (esteira/Zwift) é descartada**; `TrailRun` passa (o `type` dela é `"Run"`). Os tipos descartados vão para o log em DEBUG — decidir na Fase 6, com número real na mão, se esteira conta como carga.
 - **`Activity` continua sem `corredor_id`**: a posse é atributo de persistência e vira coluna de `activities` na Fase 4. Se um dia precisar, entra como `corredor_id: str | None = None` no fim, sem quebrar teste nenhum.
 - Referência detalhada: `TASKS.md` › Fase 3.
+
+## Fase 4 (Banco) — como ficou
+
+### Schema v2 — `activities`
+
+Migração **aditiva** por `PRAGMA user_version`: `if versao < 1:` cria
+`corredor_state`, `if versao < 2:` cria `activities`. Recriar a v1 obrigaria os
+50+ participantes a reautorizar um por um.
+
+- **`UNIQUE (corredor_id, activity_id)` é o dedupe**, e é composto de propósito:
+  uma chave global faria a sincronização de um participante **capturar a linha de
+  outro** se duas inscrições apontarem para a mesma conta do Strava. Com a
+  composta, o pior caso é linha duplicada (visível), não dado atribuído à pessoa
+  errada.
+- **`activity_id` é anulável** e existe a coluna `origem` (`strava` | `manual`) —
+  acomoda desde já o histórico manual da Fase 5.5, evitando migrar depois uma
+  tabela cheia de dados de pesquisa. ⚠️ O `ON CONFLICT` **não dispara** com
+  `activity_id NULL`: reimportar histórico manual duplicaria. Há um
+  `TODO(Fase 5.5)` no `database_service.py` pedindo o índice parcial em v3.
+- **Sem FOREIGN KEY** para `corredor_state`: aquilo é cache do OAuth, não
+  cadastro (quem existe na pesquisa é o `corredores.toml`). A Fase 5.5 precisa
+  adotar planilha de quem ainda não autorizou; uma FK viraria erro.
+- **`pace` não é coluna.** É função de distância e tempo, e o pace da pesquisa é o
+  **diário** (Σ tempo ÷ Σ km), que não é a média dos paces por atividade. A regra
+  geral: guardamos o que a fonte afirma (`average_speed`), não o que calculamos.
+
+### As três datas (não podem ser confundidas)
+
+| Coluna | Conteúdo | Para quê |
+|---|---|---|
+| `date_local` | ISO **sem fuso**, do `start_date_local` | hora do treino; desempate na ordenação |
+| `day` | `YYYY-MM-DD` | **a linha da planilha** |
+| `start_date_utc` | ISO UTC, do `start_date` | marca d'água do `after=` |
+
+⚠️ `date_local` usa **`para_texto_local` / `de_texto_local`**, nunca
+`para_texto` / `de_texto`: estes assumem UTC no ingênuo e gravariam "22h UTC"
+para uma corrida das 22h locais, deslocando-a de dia. É o erro mais fácil de
+cometer aqui, porque o helper errado existe e parece certo.
+
+`Activity` ganhou **`start_date_utc`** (opcional, no fim). A leitura no
+`ActivityService` é **não fatal**, ao contrário do `start_date_local`: sem ela o
+`after=` cai no `cutover_date` e a execução repagina histórico — custa cota, não
+corrompe dado.
+
+### `ActivityRepository`
+
+`existe` / `salvar` / `salvar_muitas` / `por_dia` / `por_periodo` /
+`ultimo_evento_em`. Nomes em português, como o `CorredorStateRepository`.
+
+- **Upsert, não "pula se já existe"**: a janela de 2 dias reencontra a corrida, e
+  um atleta que corrige a distância depois do upload teria a correção descartada.
+  A regra do `COALESCE`: use onde `None` é "não perguntamos" (`calories`, que a
+  listagem nunca traz); sobrescreva onde `None` é "o atleta não tem esse dado"
+  (FC, cadência) — blindar estes tornaria impossível corrigir valor errado.
+- **`INSERT OR REPLACE` é proibido** (comentado no código): é DELETE + INSERT,
+  zera `criado_em`, troca o id e apaga colunas omitidas.
+- **`ResultadoGravacao.dias_afetados`** inclui o **dia antigo** quando o atleta
+  muda a data da corrida no Strava — sem isso a linha antiga ficaria com carga
+  fantasma e nada apontaria para lá. O evento também vai a WARNING.
+- **Lote atômico por corredor**, com `commit()` no fim: logo depois da gravação a
+  marca d'água avança, e lote pela metade + marca d'água avançada = corridas
+  perdidas para sempre. Por isso `_executar` faz **`rollback()`** antes de
+  levantar — senão as linhas parciais entrariam pelo `commit()` do corredor
+  seguinte.
+- **`ultimo_evento_em` sai do banco**, não do retorno da API: assim a marca
+  d'água nunca ultrapassa o que foi persistido. Linhas manuais
+  (`start_date_utc IS NULL`) são ignoradas pelo `MAX`.
+- **`existe` não é usado na sincronização** — o dedupe é o índice. Fica como
+  afordância de diagnóstico, e isso está no docstring para não parecer órfão.
+- **Data ilegível em `date_local` levanta**, divergindo de propósito do
+  `corredor_state` (onde vira `None`): ali custa uma página de API, aqui faria a
+  corrida **sumir da agregação** e subnotificar a carga sem sinal nenhum.
+
+### Pendências que a Fase 4 empurra para a Fase 6
+
+- Agregar a partir do **banco** (`por_dia`), não do retorno da API.
+- Reescrever também os `dias_afetados`.
+- **Atividade apagada no Strava não é detectada**: ela só para de aparecer, e a
+  carga fantasma fica na planilha e no ACWR. A reconciliação é barata (tudo com
+  `start_date_utc >= after` deveria ter voltado) e o comportamento deve ser
+  **logar, não apagar**.

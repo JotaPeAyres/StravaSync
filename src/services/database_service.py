@@ -1,16 +1,26 @@
 """Infraestrutura do SQLite: conexão e migração do schema.
 
-A Fase 3 cria a tabela de **estado por corredor** (token corrente, atleta
-autorizado, última sincronização) — o que o `corredores.toml` não pode guardar
-porque o app nunca reescreve aquele arquivo.
+Duas tabelas:
+
+- `corredor_state` (v1) — o estado do OAuth por participante, que o
+  `corredores.toml` não pode guardar porque o app nunca reescreve aquele arquivo.
+- `activities` (v2) — os dados ricos por atividade, que não vão para o Excel.
 
 O schema evolui por `PRAGMA user_version`, e não por `CREATE TABLE IF NOT
-EXISTS` solto: assim a Fase 4 acrescenta a tabela `activities` num bloco novo
-sem tocar no que a Fase 3 já gravou nos bancos existentes.
+EXISTS` solto: cada versão acrescenta um bloco sem tocar no que a anterior
+gravou nos bancos que já existem.
 
-Datas são gravadas como **texto ISO-8601 em UTC**. Os adaptadores automáticos de
-`datetime` do `sqlite3` estão depreciados desde o Python 3.12; converter na mão
-é explícito e não some numa versão futura.
+Datas são gravadas como **texto**, nunca como objeto: os adaptadores automáticos
+de `datetime` do `sqlite3` estão depreciados desde o Python 3.12. E são **dois
+pares de conversores**, porque o projeto lida com dois tipos de instante que não
+podem ser confundidos:
+
+- `para_texto` / `de_texto` — instantes **absolutos**, normalizados para UTC.
+  São o `start_date` do Strava e os carimbos de execução.
+- `para_texto_local` / `de_texto_local` — horário **local e ingênuo** do
+  corredor (o `start_date_local`). Passar um desses pelo par de cima gravaria
+  "22h UTC" para uma corrida das 22h locais e devolveria um datetime *aware*,
+  deslocando a corrida de dia — ou seja, de linha da planilha.
 """
 from __future__ import annotations
 
@@ -25,8 +35,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Sobe para 2 na Fase 4, quando entrar a tabela `activities`.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS corredor_state (
@@ -44,8 +53,49 @@ CREATE TABLE IF NOT EXISTS corredor_state (
 );
 """
 
-# TODO(Fase 4): schema v2 — tabela `activities`, com `corredor_id` referenciando
-# `corredor_state` e o `activity_id` único (dedupe).
+# `activities` guarda os dados ricos por atividade — o que NÃO vai para o Excel.
+#
+# `corredor_id` se relaciona logicamente com `corredor_state`, mas **sem FOREIGN
+# KEY declarada**: `corredor_state` é cache do estado do OAuth, não o cadastro da
+# pesquisa (quem existe é o `corredores.toml`). Um participante pode ter dados
+# sem nunca ter se inscrito — é exatamente o caso da adoção de planilha
+# preenchida à mão (Fase 5.5), em que a planilha existe há meses e o OAuth é de
+# hoje. Uma FK transformaria isso em erro, e `ON DELETE CASCADE` apagaria dados
+# de pesquisa junto com um token. O índice abaixo dá a performance que se
+# esperaria da FK.
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS activities (
+    id                INTEGER PRIMARY KEY,
+    corredor_id       TEXT    NOT NULL,
+    activity_id       INTEGER,
+    origem            TEXT    NOT NULL DEFAULT 'strava',
+    name              TEXT    NOT NULL DEFAULT '',
+    type              TEXT    NOT NULL DEFAULT 'Run',
+    day               TEXT    NOT NULL,
+    date_local        TEXT    NOT NULL,
+    start_date_utc    TEXT,
+    distance_m        REAL    NOT NULL,
+    moving_time_s     INTEGER NOT NULL,
+    elapsed_time_s    INTEGER NOT NULL,
+    average_speed     REAL,
+    average_heartrate REAL,
+    max_heartrate     REAL,
+    elevation_gain    REAL,
+    calories          REAL,
+    cadence           REAL,
+    criado_em         TEXT    NOT NULL,
+    atualizado_em     TEXT    NOT NULL,
+    UNIQUE (corredor_id, activity_id),
+    CHECK (distance_m >= 0 AND moving_time_s >= 0 AND elapsed_time_s >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS ix_activities_corredor_day ON activities (corredor_id, day);
+"""
+
+# TODO(Fase 5.5): antes da PRIMEIRA importação de histórico manual, criar em v3
+# `CREATE UNIQUE INDEX ... ON activities(corredor_id, day) WHERE activity_id IS NULL`.
+# O `ON CONFLICT` não dispara com `activity_id NULL` (o SQLite trata cada NULL
+# como distinto), então hoje reimportar histórico manual duplicaria tudo.
 
 
 class DatabaseService:
@@ -79,10 +129,13 @@ class DatabaseService:
             if versao >= SCHEMA_VERSION:
                 return
 
+            # Cada bloco é aditivo: uma versão nova nunca reescreve o que a
+            # anterior gravou. Recriar `corredor_state` obrigaria os 50+
+            # participantes a autorizar de novo, um por um, por mensagem.
             if versao < 1:
                 conn.executescript(_SCHEMA_V1)
-
-            # TODO(Fase 4): if versao < 2: conn.executescript(_SCHEMA_V2)
+            if versao < 2:
+                conn.executescript(_SCHEMA_V2)
 
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
@@ -133,3 +186,37 @@ def de_texto(valor: str | None) -> datetime | None:
     if momento.tzinfo is None:
         momento = momento.replace(tzinfo=UTC)
     return momento.astimezone(UTC)
+
+
+def para_texto_local(momento: datetime) -> str:
+    """Converte um horário LOCAL e ingênuo em texto, sem inventar fuso.
+
+    Não use `para_texto` para isto: ele assume UTC no ingênuo e gravaria um
+    instante que não é o da corrida. Aqui o fuso é descartado, nunca convertido
+    — é a mesma regra do `start_date_local` no `ActivityService`.
+    """
+    if momento.tzinfo is not None:
+        logger.debug("Horário local recebido com fuso (%s); o fuso é descartado.", momento.tzinfo)
+        momento = momento.replace(tzinfo=None)
+    return momento.isoformat()
+
+
+def de_texto_local(valor: str) -> datetime:
+    """Lê um horário gravado por `para_texto_local`, sempre devolvendo ingênuo.
+
+    Diferente de `de_texto`, um valor ilegível aqui **levanta**. Virar `None`
+    faria a corrida desaparecer da agregação diária e subnotificar a carga do
+    dia sem nenhum sinal — enquanto no `corredor_state` uma data ilegível só
+    custa uma página de API a mais.
+
+    Raises:
+        StateError: se o texto não for uma data ISO-8601.
+    """
+    try:
+        momento = datetime.fromisoformat(valor)
+    except (TypeError, ValueError) as erro:
+        raise StateError(
+            f"horário local inválido no banco: {valor!r} — a atividade não pode ser lida "
+            "sem saber a que dia ela pertence"
+        ) from erro
+    return momento.replace(tzinfo=None)

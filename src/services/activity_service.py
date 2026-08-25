@@ -3,16 +3,21 @@
 A agregação por dia é da Fase 6; a Fase 3 entrega o filtro e a conversão do JSON
 do Strava para o modelo interno.
 
-⚠️ **O horário lido é o `start_date_local`, nunca o `start_date`.** A planilha é
+⚠️ **O horário que decide a linha da planilha é o `start_date_local`.** A grade é
 indexada pelo dia local do corredor: uma corrida às 22h de 01/01 pertence à linha
 de 01/01, e não à de 02/01, que é o dia em UTC. E o `start_date_local` termina
 com `Z` — mas esse `Z` é mentira: o valor já está no fuso do atleta. Convertê-lo
 para UTC deslocaria a corrida de dia, ou seja, de **linha da planilha**.
+
+O `start_date` (UTC de verdade) também é lido, mas para outra pergunta: é a marca
+d'água do `after=`, que o Strava filtra por UTC. Os dois campos convivem no
+modelo justamente porque respondem a coisas diferentes — ver `_data_local` e
+`_data_utc`.
 """
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.models.activity import Activity
 from src.utils.errors import InvalidResponseError
@@ -81,6 +86,7 @@ class ActivityService:
             # corrida. Com 50+ participantes isso incendiaria a cota.
             calories=None,
             cadence=_opcional(payload, "average_cadence"),
+            start_date_utc=_data_utc(payload, rotulo),
         )
 
     def to_activities(self, payloads: list[dict]) -> list[Activity]:
@@ -113,6 +119,36 @@ def _data_local(payload: dict, rotulo: str) -> datetime:
         raise InvalidResponseError(f"{rotulo}: start_date_local={bruto!r} inválido") from erro
 
     return momento.replace(tzinfo=None)
+
+
+def _data_utc(payload: dict, rotulo: str) -> datetime | None:
+    """Lê `start_date` — o instante ABSOLUTO da largada, em UTC.
+
+    Ao contrário do `start_date_local`, aqui o fuso é real e é convertido, não
+    descartado. Este é o valor que alimenta a marca d'água do `after=`, que o
+    Strava filtra por UTC.
+
+    Ausência ou valor inválido **não** é fatal, e a assimetria com o
+    `_data_local` é proposital: sem `start_date_local` não há como saber a que
+    linha da planilha a corrida pertence, enquanto sem `start_date` a busca
+    seguinte apenas recomeça do `cutover_date` e repagina histórico — custa
+    cota, não corrompe dado. Derrubar a coleta do participante por isso seria
+    desproporcional.
+    """
+    bruto = payload.get("start_date")
+    if not bruto:
+        logger.debug("%s: sem `start_date`; a marca d'água do after= não avança por ela.", rotulo)
+        return None
+
+    try:
+        momento = datetime.fromisoformat(str(bruto))
+    except ValueError:
+        logger.debug("%s: start_date=%r inválido; ignorado.", rotulo, bruto)
+        return None
+
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=UTC)
+    return momento.astimezone(UTC)
 
 
 def _inteiro(payload: dict, campo: str, rotulo: str) -> int:

@@ -28,6 +28,12 @@ class Activity:
     elevation_gain: float | None = None
     calories: float | None = None
     cadence: float | None = None
+    # Instante ABSOLUTO da largada (o `start_date` do Strava, em UTC). Não é o
+    # mesmo que `date`: uma corrida às 22h de 01/01 local pode ser 01:15 de
+    # 02/01 em UTC. Serve à marca d'água do `after=`, que o Strava filtra por
+    # UTC — enquanto `date` decide a linha da planilha. Opcional porque a
+    # ausência dele encarece a busca seguinte, mas não invalida a corrida.
+    start_date_utc: datetime | None = None
 
     @property
     def day(self) -> date:

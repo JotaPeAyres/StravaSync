@@ -5,7 +5,7 @@ errado desloca a corrida de dia — e dia errado é **linha errada da planilha**
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -90,6 +90,38 @@ def test_o_z_do_horario_local_e_descartado_nao_convertido(servico):
     assert atividade.date.hour == 23
     assert atividade.date.tzinfo is None
     assert atividade.day.isoformat() == "2026-03-10"
+
+
+def test_le_o_start_date_utc_alem_do_local(servico):
+    """As duas datas convivem porque respondem a perguntas diferentes.
+
+    A local decide a linha da planilha; a UTC é a marca d'água do `after=`, que
+    o Strava filtra por UTC. No payload de teste elas caem em dias diferentes.
+    """
+    atividade = servico.to_activity(_corrida())
+
+    assert atividade.date == datetime(2026, 1, 1, 22, 15, 30)  # noqa: DTZ001 — local ingênuo
+    assert atividade.start_date_utc == datetime(2026, 1, 2, 1, 15, 30, tzinfo=UTC)
+    assert atividade.day.isoformat() == "2026-01-01"
+
+
+@pytest.mark.parametrize("valor", [None, "ontem", ""])
+def test_start_date_ausente_ou_invalido_nao_derruba_a_conversao(servico, valor):
+    """Sem ele a busca seguinte repagina histórico — custa cota, não corrompe dado.
+
+    Matar a coleta do participante por causa disso seria desproporcional; é a
+    assimetria proposital em relação ao `start_date_local`, que é fatal.
+    """
+    payload = _corrida()
+    if valor is None:
+        del payload["start_date"]
+    else:
+        payload["start_date"] = valor
+
+    atividade = servico.to_activity(payload)
+
+    assert atividade.start_date_utc is None
+    assert atividade.date == datetime(2026, 1, 1, 22, 15, 30)  # noqa: DTZ001 — segue válida
 
 
 def test_mapeia_os_campos_do_strava(servico):
