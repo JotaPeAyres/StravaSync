@@ -11,10 +11,10 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
 - **Fase 1 (Estrutura): concluída e na `main`** (branch `fase-1-estrutura` mergeada; pode ser apagada).
 - **Fase 2 (Configuração): concluída e na `main`** — config em duas camadas (`.env` global + `corredores.toml`), logging central, modelos (`Activity`, `DailyLoad`, `Corredor`), 54 testes. Branch `fase-2-configuracao` mergeada; pode ser apagada.
 - **Fase 3 (Strava): implementada na branch `fase-3-strava`**, ainda **não mergeada**. Entrega: hierarquia de exceções, tabela de estado por corredor no SQLite, `RateLimiter`, `StravaClient`, política OAuth (`utils/auth.py`), filtro/conversão de atividades e a CLI `src/inscricao.py`. 197 testes, tudo com `httpx.MockTransport` — **nenhuma credencial real foi usada**.
-- **Fase 4 (Banco): implementada na branch `fase-4-banco`** (criada a partir de `fase-3-strava`, já que a Fase 3 não foi mergeada). Entrega: schema v2 com `activities`, `ActivityRepository` com upsert, consultas por período e a marca d'água do `after=`. 238 testes.
-- A `main` local está **1 merge à frente do `origin/main`** — nada foi enviado ainda.
-- **Pendência bloqueante para validar as Fases 3 e 4 de verdade**: registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — a Fase 5 (Excel) também é local.
-- **Próxima: Fase 5 (Excel)** — `ExcelService` com openpyxl, escrevendo só as células de entrada.
+- **Fase 4 (Banco): implementada e na `main`.** Entrega: schema v2 com `activities`, `ActivityRepository` com upsert, consultas por período e a marca d'água do `after=`. 238 testes.
+- **Fase 5 (Excel): implementada na branch `fase-5-excel`**, ainda **não mergeada**. Entrega: `ExcelService.sincronizar(corredor, daily_loads)`, escrevendo só `Daily_Data` (B/C) e `PACE` (B/C/D/E), validando `B2` como fonte da verdade, respeitando os tetos de cada aba e salvando de forma atômica (`.tmp.xlsx` + `os.replace`). Testado contra o **template real** (`Cópia de Planilha_carga_corrida.xlsx`), inclusive round-trip de fórmulas e named ranges. 256 testes.
+- **Pendência bloqueante para validar as Fases 3 e 4 de verdade**: registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — a Fase 5 (Excel) é local e já foi validada contra o template real.
+- **Próxima: Fase 6 (Regra de Negócio)** — `SyncService`/`ActivityService.aggregate_daily`, ligando Strava → SQLite → `ExcelService`.
 
 ## Convenções de trabalho (IMPORTANTE)
 
@@ -71,7 +71,7 @@ src/
   api/rate_limiter.py                  # ✅ Fase 3
   services/activity_service.py         # ✅ Fase 3 (agregação: Fase 6)
   services/sync_service.py             # Fase 6 (orquestra tudo)
-  services/excel_service.py            # Fase 5 (escreve entradas, preserva fórmulas)
+  services/excel_service.py            # ✅ Fase 5
   services/database_service.py         # ✅ Fase 3 (schema v1) — v2 na Fase 4
   models/activity.py, models/daily_load.py, models/corredor.py ✅
   repositories/activity_repository.py  # ✅ Fase 4
@@ -247,3 +247,72 @@ corrompe dado.
   carga fantasma fica na planilha e no ACWR. A reconciliação é barata (tudo com
   `start_date_utc >= after` deveria ter voltado) e o comportamento deve ser
   **logar, não apagar**.
+
+## Fase 5 (Excel) — como ficou
+
+### `ExcelService.sincronizar(corredor, daily_loads)`
+
+Um método só: recebe o `Corredor` (para `start_date`, `dia_da_planilha` e
+`excel_path`) e os `DailyLoad` a gravar, devolve `ResultadoExcel` (dias
+escritos por aba, descartados e além do teto). **Não conhece o SQLite nem a
+API** — quem agrega (Fase 6) decide o que mandar; isto aqui só escreve.
+
+- **Abre com `openpyxl.load_workbook()` sem `data_only`**: assim a fórmula fica
+  como fórmula (string) e é regravada tal como estava — é o Excel, ao abrir,
+  quem recalcula os valores. Carregar com `data_only=True` teria devolvido o
+  **valor em cache** da última vez que alguém abriu no Excel, e regravar isso
+  teria **apagado a fórmula** da coluna.
+- **`B2` de `Daily_Data` é a fonte da verdade** depois da primeira escrita:
+  `B2` vazio → bootstrap, seguem escrita normal (o `Dia 1` grava `B2` sozinho).
+  `B2` preenchido e diferente do `start_date` do cadastro → `DataBaseDivergenteError`,
+  **nada é escrito** para aquele corredor. `B2` ilegível (texto que não é data)
+  recebe o mesmo tratamento — confere a planilha e cadastro antes de seguir.
+- **Grade tem teto por aba, e cada aba é independente**: `Daily_Data` até a
+  linha 366, `PACE` até a 154 (~5 meses — estoura bem antes de `Daily_Data`).
+  Um dia além do teto é **descartado só naquela aba** — `WARNING` no log, sem
+  abortar o corredor nem perder o dado (que segue íntegro no SQLite). Decisão
+  do usuário: criar uma segunda planilha automaticamente fica para quando o
+  problema aparecer de verdade, não antecipado aqui.
+- **Dia anterior ao `Dia 1` (`dia <= 0`) também é descartado com `WARNING`** —
+  defesa a mais, redundante com o filtro que a Fase 6 (`SyncService`) deve
+  aplicar antes de chamar o Excel; nenhuma das duas pontas confia sozinha na
+  outra.
+- **Dia de descanso**: `Daily_Data!C` e `PACE!C` recebem `0.0` (a grade é
+  contígua — nunca célula vazia); `PACE!D`/`E` (Pace/Tempo) ficam **em
+  branco** (`None`), não zero — um pace de "0 min/km" seria lido como dado,
+  não como ausência dele.
+- **Grava em `.tmp.xlsx` no mesmo diretório e troca com `os.replace`**
+  (atômico no mesmo filesystem): uma falha no meio do `wb.save()` não pode
+  corromper a planilha do corredor pela metade. `os.replace` falhando com
+  `PermissionError` (destino aberto no Excel, trava do Windows) vira
+  `PlanilhaEmUsoError` — mensagem específica, e o arquivo original nunca é
+  tocado até a troca ter sucesso.
+- **Lista de `daily_loads` vazia não abre nem salva o arquivo** — evita
+  reescrever (e arriscar `PlanilhaEmUsoError`) uma planilha sem nenhuma
+  mudança de conteúdo real.
+- ⚠️ **Datas voltam do openpyxl como `datetime`, nunca `date`**, mesmo em
+  célula formatada como data — quem ler `B2`/coluna B para comparar precisa de
+  `.date()` primeiro (armadilha nos testes, documentada lá).
+- Testado contra o **template real** (`Cópia de Planilha_carga_corrida.xlsx`),
+  não um mock: round-trip de fórmulas (`D2`/`F2`/`G2`/`H2`) e dos *named
+  ranges* (`DatasDiarias`, `ACWR_EWMA`, ...) confirmado — nenhum é alterado
+  pela gravação.
+
+### Erros novos em `utils/errors.py`
+
+`PlanilhaError` (raiz) → `PlanilhaNaoEncontradaError` (onboarding não fez a
+cópia do template), `PlanilhaEmUsoError` (arquivo aberto em outro programa,
+na leitura ou na escrita) e `DataBaseDivergenteError` (`B2` × cadastro). Sem
+depender de `openpyxl` nem de nada do projeto, como o resto do módulo.
+
+### Pendências que a Fase 5 empurra adiante
+
+- **Fase 5.5** decide o que fazer com planilha adotada (histórico manual antes
+  do `cutover_date`) — `ExcelService` já respeita `B2` como fonte da verdade,
+  mas ainda não lê "até onde a planilha já foi preenchida à mão".
+- **Fase 6** é quem decide *o que* mandar para `sincronizar()`: filtrar por
+  `cutover_date`, agregar do banco (`por_dia`), e reescrever os
+  `dias_afetados` do `ResultadoGravacao` da Fase 4.
+- Se um dia a pesquisa decidir abrir uma segunda planilha por corredor quando
+  a grade esgotar, o ponto de entrada é o `WARNING` de "além do limite" — hoje
+  só logado, o dado permanece no SQLite.

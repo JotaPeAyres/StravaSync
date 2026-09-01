@@ -134,3 +134,36 @@ class UnexpectedAthleteError(AuthorizationError):
 
 class StateError(StravaSyncError):
     """Falha ao ler ou gravar o estado local (SQLite)."""
+
+
+class PlanilhaError(StravaSyncError):
+    """Falha ao ler ou escrever a planilha de carga de um corredor."""
+
+
+class PlanilhaNaoEncontradaError(PlanilhaError):
+    """O arquivo da planilha não existe.
+
+    O onboarding do corredor (copiar o template) é manual e acontece fora do
+    app — isto é o que aparece quando alguém cadastra um `excel_path` antes de
+    fazer a cópia.
+    """
+
+
+class PlanilhaEmUsoError(PlanilhaError):
+    """O arquivo está aberto em outro programa (tipicamente o Excel) e não pôde
+    ser lido ou salvo.
+
+    Rotineiro o bastante para merecer classe própria: com 50+ planilhas
+    abertas por pesquisadores, alguém vai estar com a planilha aberta na hora
+    da execução agendada.
+    """
+
+
+class DataBaseDivergenteError(PlanilhaError):
+    """A célula B2 já gravada diverge do `start_date` do cadastro.
+
+    Depois da primeira escrita, `B2` é a fonte da verdade — reescrevê-la
+    deslocaria a grade inteira (todo dia já gravado mudaria de linha). Quem
+    encontra isto precisa corrigir o `corredores.toml` para bater com a
+    planilha, não o contrário.
+    """
