@@ -18,9 +18,10 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 
 from src.models.activity import Activity
+from src.models.registro_historico import RegistroHistorico
 from src.services.database_service import (
     de_texto,
     de_texto_local,
@@ -175,7 +176,78 @@ class ActivityRepository:
         # banco quebra essa ordenação sem erro nenhum.
         return de_texto(linha["ultimo"]) if linha is not None else None
 
+    def importar_historico(
+        self, corredor_id: str, registros: Iterable[RegistroHistorico]
+    ) -> ResultadoGravacao:
+        """Importa o período manual (Fase 5.5) como atividades de origem `manual`.
+
+        Só dias com corrida de fato viram linha — um dia de descanso nunca é
+        uma atividade, nem quando a sincronização vem do Strava.
+
+        O upsert usa o índice **parcial** `(corredor_id, day) WHERE activity_id
+        IS NULL` (schema v3), e não o `UNIQUE (corredor_id, activity_id)` da
+        Fase 4: histórico manual não tem `activity_id`, e sem esse índice o
+        `ON CONFLICT` não dispara — rodar a adoção duas vezes duplicaria o
+        período inteiro a cada vez, em vez de atualizar.
+
+        `start_date_utc` fica `NULL` de propósito: não sabemos a hora exata de
+        uma corrida digitada à mão, e `ultimo_evento_em` já ignora linhas
+        assim — histórico manual nunca deve empurrar a marca d'água do
+        `after=`.
+        """
+        corridas = [registro for registro in registros if registro.tem_corrida]
+        if not corridas:
+            return ResultadoGravacao(0, 0)
+
+        for registro in corridas:
+            if registro.tempo_total_s is None:
+                logger.warning(
+                    "Corredor %s: %s importado sem tempo conhecido (PACE não "
+                    "cobria o dia) — pace daquele dia fica indeterminado.",
+                    corredor_id,
+                    registro.day.isoformat(),
+                )
+
+        carimbo = para_texto(self._agora())
+        dias_existentes = self._dias_manuais_existentes(corredor_id, corridas)
+
+        parametros = [self._parametros_manual(corredor_id, r, carimbo) for r in corridas]
+        self._executar_muitas(_SQL_UPSERT_MANUAL, parametros)
+        self._conn.commit()
+
+        novas = sum(1 for r in corridas if r.day.isoformat() not in dias_existentes)
+        atualizadas = len(corridas) - novas
+        return ResultadoGravacao(novas, atualizadas, frozenset(r.day for r in corridas))
+
     # --------------------------------------------------------------- interno
+
+    def _dias_manuais_existentes(
+        self, corredor_id: str, registros: list[RegistroHistorico]
+    ) -> set[str]:
+        """Dias do lote que já têm linha manual gravada — só para separar novas/atualizadas."""
+        dias = [r.day.isoformat() for r in registros]
+        marcadores = ",".join("?" * len(dias))
+        linhas = self._executar(
+            f"SELECT day FROM activities WHERE corredor_id = ? AND activity_id IS NULL "
+            f"AND day IN ({marcadores})",
+            (corredor_id, *dias),
+        ).fetchall()
+        return {linha["day"] for linha in linhas}
+
+    def _parametros_manual(
+        self, corredor_id: str, registro: RegistroHistorico, carimbo: str
+    ) -> dict:
+        """Uma linha manual a partir do `RegistroHistorico` lido da planilha."""
+        tempo_s = registro.tempo_total_s if registro.tempo_total_s is not None else 0
+        return {
+            "corredor_id": corredor_id,
+            "day": registro.day.isoformat(),
+            "date_local": para_texto_local(datetime.combine(registro.day, time.min)),
+            "distance_m": registro.carga_km * 1000,
+            "moving_time_s": tempo_s,
+            "elapsed_time_s": tempo_s,
+            "carimbo": carimbo,
+        }
 
     def _dias_gravados(self, corredor_id: str, lote: tuple[Activity, ...]) -> dict[int, str]:
         """Dia atualmente gravado para cada atividade do lote que já existe.
@@ -329,6 +401,26 @@ ON CONFLICT (corredor_id, activity_id) DO UPDATE SET
     calories          = COALESCE(excluded.calories, activities.calories),
     cadence           = excluded.cadence,
     atualizado_em     = excluded.atualizado_em
+"""
+
+# Conflito no índice PARCIAL da v3 — `(corredor_id, day) WHERE activity_id IS
+# NULL` —, não no `UNIQUE (corredor_id, activity_id)` da v2: linha manual não
+# tem `activity_id`, e o SQLite trata cada `NULL` como distinto, então o
+# upsert de cima nunca dispararia para elas.
+_SQL_UPSERT_MANUAL = """
+INSERT INTO activities (
+    corredor_id, activity_id, origem, name, type, day, date_local, start_date_utc,
+    distance_m, moving_time_s, elapsed_time_s, criado_em, atualizado_em
+) VALUES (
+    :corredor_id, NULL, 'manual', '', 'Run', :day, :date_local, NULL,
+    :distance_m, :moving_time_s, :elapsed_time_s, :carimbo, :carimbo
+)
+ON CONFLICT (corredor_id, day) WHERE activity_id IS NULL DO UPDATE SET
+    date_local     = excluded.date_local,
+    distance_m     = excluded.distance_m,
+    moving_time_s  = excluded.moving_time_s,
+    elapsed_time_s = excluded.elapsed_time_s,
+    atualizado_em  = excluded.atualizado_em
 """
 
 

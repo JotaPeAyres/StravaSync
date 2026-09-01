@@ -35,7 +35,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS corredor_state (
@@ -92,10 +92,30 @@ CREATE TABLE IF NOT EXISTS activities (
 CREATE INDEX IF NOT EXISTS ix_activities_corredor_day ON activities (corredor_id, day);
 """
 
-# TODO(Fase 5.5): antes da PRIMEIRA importação de histórico manual, criar em v3
-# `CREATE UNIQUE INDEX ... ON activities(corredor_id, day) WHERE activity_id IS NULL`.
-# O `ON CONFLICT` não dispara com `activity_id NULL` (o SQLite trata cada NULL
-# como distinto), então hoje reimportar histórico manual duplicaria tudo.
+# `activities` v3: índice parcial que faz o upsert do histórico manual
+# funcionar. O `ON CONFLICT (corredor_id, activity_id)` da v2 **não dispara**
+# com `activity_id NULL` (o SQLite trata cada NULL como distinto) — sem este
+# índice, rodar a adoção duas vezes duplicaria o histórico inteiro a cada vez.
+#
+# `excel_escritas` guarda o último valor que o **próprio app** escreveu em
+# cada dia da planilha — não é o mesmo que "o valor atual da célula". É a
+# única forma de distinguir "chegou uma atividade nova para este dia" (o app
+# escreve de novo, é rotina) de "um humano editou a célula depois do corte"
+# (o valor atual diverge do que o app tinha guardado como seu, mesmo sem
+# ninguém ter mandado escrever nada de novo) — ver `ExcelService.sincronizar`.
+_SCHEMA_V3 = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_activities_corredor_day_manual
+    ON activities (corredor_id, day) WHERE activity_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS excel_escritas (
+    corredor_id   TEXT    NOT NULL,
+    day           TEXT    NOT NULL,
+    carga_km      REAL    NOT NULL,
+    tempo_total_s INTEGER NOT NULL,
+    atualizado_em TEXT    NOT NULL,
+    PRIMARY KEY (corredor_id, day)
+);
+"""
 
 
 class DatabaseService:
@@ -136,6 +156,8 @@ class DatabaseService:
                 conn.executescript(_SCHEMA_V1)
             if versao < 2:
                 conn.executescript(_SCHEMA_V2)
+            if versao < 3:
+                conn.executescript(_SCHEMA_V3)
 
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()

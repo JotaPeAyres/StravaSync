@@ -20,11 +20,15 @@ from src.models.daily_load import DailyLoad
 from src.services.excel_service import (
     ABA_DAILY_DATA,
     ABA_PACE,
+    COL_CARGA,
+    COL_DATA,
+    COL_TEMPO,
     ExcelService,
     ResultadoExcel,
 )
 from src.utils.errors import (
     DataBaseDivergenteError,
+    GradeDesalinhadaError,
     PlanilhaEmUsoError,
     PlanilhaNaoEncontradaError,
 )
@@ -47,13 +51,15 @@ def planilha(tmp_path) -> Path:
     return destino
 
 
-def _corredor(excel_path: Path, *, start_date: date = INICIO) -> Corredor:
+def _corredor(
+    excel_path: Path, *, start_date: date = INICIO, cutover_date: date | None = None
+) -> Corredor:
     return Corredor(
         id="p001",
         nome="Ana",
         refresh_token="token",
         start_date=start_date,
-        cutover_date=start_date,
+        cutover_date=cutover_date or start_date,
         excel_path=excel_path,
     )
 
@@ -126,9 +132,14 @@ def test_devolve_contagem_de_dias_escritos(planilha):
         _corredor(planilha), [_carga(0), _carga(1), _descanso(2)]
     )
 
-    assert resultado == ResultadoExcel(
-        dias_escritos_daily_data=3, dias_escritos_pace=3, dias_descartados=0
-    )
+    assert resultado.dias_escritos_daily_data == 3
+    assert resultado.dias_escritos_pace == 3
+    assert resultado.dias_descartados == 0
+    assert set(resultado.novas_escritas) == {
+        INICIO,
+        INICIO + timedelta(days=1),
+        INICIO + timedelta(days=2),
+    }
 
 
 def test_lista_vazia_nao_toca_o_arquivo(planilha):
@@ -266,3 +277,235 @@ def test_planilha_aberta_no_replace_levanta_erro_especifico(planilha, monkeypatc
     # E o temporário não pode ter sobrado no diretório do corredor.
     sobras = list(planilha.parent.glob(".*.tmp.xlsx"))
     assert sobras == []
+
+
+# --------------------------------------------------------------- Fase 5.5: corte manual
+
+
+def _preencher_linha(
+    wb, corredor: Corredor, dia: date, carga_km: float, minutos: float | None = None
+) -> None:
+    """Escreve uma linha diretamente, como se um humano tivesse digitado."""
+    linha = corredor.dia_da_planilha(dia) + 1
+    wb[ABA_DAILY_DATA].cell(row=linha, column=COL_DATA).value = dia
+    wb[ABA_DAILY_DATA].cell(row=linha, column=COL_CARGA).value = carga_km
+    if minutos is not None:
+        wb[ABA_PACE].cell(row=linha, column=COL_DATA).value = dia
+        wb[ABA_PACE].cell(row=linha, column=COL_TEMPO).value = timedelta(minutes=minutos)
+
+
+def test_dia_antes_do_cutover_nao_e_sobrescrito(planilha):
+    cutover = INICIO + timedelta(days=5)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    _preencher_linha(wb, corredor, INICIO, 7.5)
+    wb.save(planilha)
+
+    resultado = ExcelService().sincronizar(corredor, [_carga(0, km=999.0)])
+
+    assert resultado.dias_sob_gestao_manual == 1
+    assert resultado.dias_escritos_daily_data == 0
+
+    wb = _abrir(planilha)
+    assert wb[ABA_DAILY_DATA]["C2"].value == 7.5
+
+
+def test_dia_do_cutover_e_escrito_normalmente(planilha):
+    cutover = INICIO + timedelta(days=2)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    resultado = ExcelService().sincronizar(corredor, [_carga(2, km=12.0)])
+
+    assert resultado.dias_escritos_daily_data == 1
+    assert resultado.dias_sob_gestao_manual == 0
+
+
+# --------------------------------------------------------------- Fase 5.5: edição humana
+
+
+def test_edicao_humana_pos_corte_e_preservada(planilha):
+    corredor = _corredor(planilha)
+    primeiro = ExcelService().sincronizar(corredor, [_carga(0, km=10.0, minutos=50.0)])
+
+    # Humano corrige a distância na planilha, com o relógio na mão.
+    wb = _abrir(planilha)
+    wb[ABA_DAILY_DATA].cell(row=2, column=COL_CARGA).value = 99.0
+    wb.save(planilha)
+
+    segundo = ExcelService().sincronizar(
+        corredor, [_carga(0, km=11.0, minutos=55.0)], ultima_escrita=primeiro.novas_escritas
+    )
+
+    assert segundo.dias_preservados == 1
+    assert segundo.dias_escritos_daily_data == 0
+    assert INICIO not in segundo.novas_escritas
+
+    wb = _abrir(planilha)
+    assert wb[ABA_DAILY_DATA].cell(row=2, column=COL_CARGA).value == 99.0
+
+
+def test_sem_edicao_humana_app_sobrescreve_normalmente(planilha):
+    """Uma nova sincronização legítima (ex.: Strava corrigiu a distância) não é edição humana."""
+    corredor = _corredor(planilha)
+    primeiro = ExcelService().sincronizar(corredor, [_carga(0, km=10.0, minutos=50.0)])
+
+    segundo = ExcelService().sincronizar(
+        corredor, [_carga(0, km=10.5, minutos=52.0)], ultima_escrita=primeiro.novas_escritas
+    )
+
+    assert segundo.dias_preservados == 0
+    assert segundo.dias_escritos_daily_data == 1
+    wb = _abrir(planilha)
+    assert wb[ABA_DAILY_DATA]["C2"].value == 10.5
+
+
+def test_dia_de_descanso_nao_e_falso_positivo_de_edicao(planilha):
+    """Baseline de descanso (tempo=0) não pode parecer editado por causa da célula em branco."""
+    corredor = _corredor(planilha)
+    primeiro = ExcelService().sincronizar(corredor, [_descanso(0)])
+
+    segundo = ExcelService().sincronizar(
+        corredor, [_descanso(0)], ultima_escrita=primeiro.novas_escritas
+    )
+
+    assert segundo.dias_preservados == 0
+
+
+def test_sem_baseline_sempre_escreve(planilha):
+    """`ultima_escrita=None` é o comportamento da Fase 5: nunca detecta edição."""
+    corredor = _corredor(planilha)
+    ExcelService().sincronizar(corredor, [_carga(0, km=10.0)])
+
+    wb = _abrir(planilha)
+    wb[ABA_DAILY_DATA].cell(row=2, column=COL_CARGA).value = 42.0
+    wb.save(planilha)
+
+    resultado = ExcelService().sincronizar(corredor, [_carga(0, km=15.0)])
+
+    assert resultado.dias_preservados == 0
+    assert resultado.dias_escritos_daily_data == 1
+    wb = _abrir(planilha)
+    assert wb[ABA_DAILY_DATA]["C2"].value == 15.0
+
+
+# --------------------------------------------------------------- Fase 5.5: ler_historico_manual
+
+
+def test_historico_vazio_quando_corredor_novo(tmp_path):
+    """start_date == cutover_date: sem período manual, nem precisa abrir o arquivo."""
+    corredor = _corredor(tmp_path / "nao-existe.xlsx")
+
+    historico = ExcelService().ler_historico_manual(corredor)
+
+    assert historico.registros == ()
+    assert historico.lacunas == ()
+
+
+def test_le_periodo_manual_completo(planilha):
+    cutover = INICIO + timedelta(days=3)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    _preencher_linha(wb, corredor, INICIO, 10.0, 50.0)
+    _preencher_linha(wb, corredor, INICIO + timedelta(days=1), 0.0)
+    _preencher_linha(wb, corredor, INICIO + timedelta(days=2), 8.0, 45.0)
+    wb.save(planilha)
+
+    historico = ExcelService().ler_historico_manual(corredor)
+
+    assert [r.day for r in historico.registros] == [
+        INICIO,
+        INICIO + timedelta(days=1),
+        INICIO + timedelta(days=2),
+    ]
+    assert historico.registros[0].carga_km == 10.0
+    assert historico.registros[0].tempo_total_s == 3000
+    assert historico.registros[1].tem_corrida is False
+    assert historico.lacunas == ()
+
+
+def test_lacuna_quando_linha_sem_data(planilha):
+    cutover = INICIO + timedelta(days=3)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    _preencher_linha(wb, corredor, INICIO, 10.0)
+    # INICIO + 1 dia fica em branco de propósito — a pessoa não logou aquele dia.
+    _preencher_linha(wb, corredor, INICIO + timedelta(days=2), 8.0)
+    wb.save(planilha)
+
+    historico = ExcelService().ler_historico_manual(corredor)
+
+    assert historico.lacunas == (INICIO + timedelta(days=1),)
+    assert [r.day for r in historico.registros] == [INICIO, INICIO + timedelta(days=2)]
+
+
+def test_grade_desalinhada_levanta(planilha):
+    cutover = INICIO + timedelta(days=3)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    _preencher_linha(wb, corredor, INICIO, 10.0)  # B2 correto — não é isso que falha
+    # Linha do Dia 2 recebe a data do Dia 6 por engano — como se uma linha
+    # tivesse sido inserida ou apagada à mão na planilha.
+    wb[ABA_DAILY_DATA]["B3"] = INICIO + timedelta(days=5)
+    wb[ABA_DAILY_DATA]["C3"] = 10.0
+    wb.save(planilha)
+
+    with pytest.raises(GradeDesalinhadaError):
+        ExcelService().ler_historico_manual(corredor)
+
+
+def test_tempo_none_quando_pace_nao_cobre_o_dia(planilha):
+    # Teto de PACE (154) é bem menor que o de Daily_Data (366).
+    dia_alvo = INICIO + timedelta(days=155)
+    cutover = INICIO + timedelta(days=160)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    _preencher_linha(wb, corredor, dia_alvo, 10.0)  # sem tempo: além do teto de PACE
+    wb.save(planilha)
+
+    historico = ExcelService().ler_historico_manual(corredor)
+
+    alvo = next(r for r in historico.registros if r.day == dia_alvo)
+    assert alvo.carga_km == 10.0
+    assert alvo.tempo_total_s is None
+
+
+def test_leitura_para_no_teto_da_grade(planilha):
+    cutover = INICIO + timedelta(days=400)  # além dos 365 dias de Daily_Data
+
+    historico = ExcelService().ler_historico_manual(_corredor(planilha, cutover_date=cutover))
+
+    assert historico.registros == ()
+    assert len(historico.lacunas) == 365  # grade inteira, nada preenchido
+
+
+def test_carga_nao_numerica_vira_zero_com_warning(planilha, caplog):
+    cutover = INICIO + timedelta(days=1)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    wb[ABA_DAILY_DATA]["B2"] = INICIO
+    wb[ABA_DAILY_DATA]["C2"] = "descanso"
+    wb.save(planilha)
+
+    with caplog.at_level("WARNING"):
+        historico = ExcelService().ler_historico_manual(corredor)
+
+    assert historico.registros[0].carga_km == 0.0
+    assert "não é numérico" in caplog.text
+
+
+def test_ler_historico_valida_b2(planilha):
+    wb = _abrir(planilha)
+    wb[ABA_DAILY_DATA]["B2"] = INICIO + timedelta(days=1)  # diverge do cadastro
+    wb.save(planilha)
+
+    cutover = INICIO + timedelta(days=2)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    with pytest.raises(DataBaseDivergenteError):
+        ExcelService().ler_historico_manual(corredor)

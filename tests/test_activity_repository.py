@@ -11,11 +11,13 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from src.models.activity import Activity
+from src.models.registro_historico import RegistroHistorico
 from src.models.strava_token import StravaToken
 from src.repositories.activity_repository import (
     ORIGEM_MANUAL,
     ORIGEM_STRAVA,
     ActivityRepository,
+    ResultadoGravacao,
 )
 from src.repositories.corredor_state_repository import CorredorStateRepository
 from src.services import database_service
@@ -92,7 +94,7 @@ def test_init_schema_cria_a_tabela_de_atividades(tmp_path):
         servico.close()
 
 
-def test_migracao_de_v1_para_v2_preserva_o_estado(monkeypatch, tmp_path):
+def test_migracao_de_v1_preserva_o_estado(monkeypatch, tmp_path):
     """Recriar `corredor_state` obrigaria 50+ participantes a reautorizar.
 
     Cada um deles teria de receber um link novo, por mensagem, um por um.
@@ -120,7 +122,7 @@ def test_migracao_de_v1_para_v2_preserva_o_estado(monkeypatch, tmp_path):
         novo.init_schema()
         estado = CorredorStateRepository(novo.connect()).buscar("p001")
 
-        assert novo.connect().execute("PRAGMA user_version").fetchone()[0] == 2
+        assert novo.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert estado.refresh_token == "refresh-1"
         assert estado.athlete_id == 777
         novo.connect().execute("SELECT corredor_id FROM activities")
@@ -444,6 +446,89 @@ def test_atividades_manuais_sem_activity_id_convivem(repo):
 
     assert len(achadas) == 2
     assert all(a.id is None for a in achadas)
+
+
+def test_importar_historico_grava_so_dias_com_corrida(repo):
+    """Um dia de descanso não é uma atividade — nem quando vem do Strava."""
+    resultado = repo.importar_historico(
+        "p001",
+        [
+            RegistroHistorico(day=date(2026, 1, 1), carga_km=10.0, tempo_total_s=3000),
+            RegistroHistorico(day=date(2026, 1, 2), carga_km=0.0, tempo_total_s=None),
+        ],
+    )
+
+    assert resultado == ResultadoGravacao(1, 0, frozenset({date(2026, 1, 1)}))
+    achadas = repo.por_periodo("p001", date(2026, 1, 1), date(2026, 1, 31))
+    assert len(achadas) == 1
+    assert achadas[0].day == date(2026, 1, 1)
+
+
+def test_importar_historico_grava_distancia_e_tempo(repo):
+    repo.importar_historico(
+        "p001", [RegistroHistorico(day=date(2026, 1, 1), carga_km=10.5, tempo_total_s=3200)]
+    )
+
+    achada = repo.por_dia("p001", date(2026, 1, 1))[0]
+
+    assert achada.id is None
+    assert achada.distance_m == pytest.approx(10500.0)
+    assert achada.moving_time_s == 3200
+    assert achada.elapsed_time_s == 3200
+    assert achada.start_date_utc is None
+
+
+def test_importar_historico_e_idempotente(repo):
+    """Rodar a adoção duas vezes atualiza a linha, não duplica."""
+    registro = RegistroHistorico(day=date(2026, 1, 1), carga_km=10.0, tempo_total_s=3000)
+
+    primeiro = repo.importar_historico("p001", [registro])
+    segundo = repo.importar_historico(
+        "p001", [RegistroHistorico(day=date(2026, 1, 1), carga_km=12.0, tempo_total_s=3600)]
+    )
+
+    assert primeiro == ResultadoGravacao(1, 0, frozenset({date(2026, 1, 1)}))
+    assert segundo == ResultadoGravacao(0, 1, frozenset({date(2026, 1, 1)}))
+    achadas = repo.por_periodo("p001", date(2026, 1, 1), date(2026, 1, 31))
+    assert len(achadas) == 1
+    assert achadas[0].distance_m == pytest.approx(12000.0)
+
+
+def test_reimportar_nao_colide_com_atividade_do_strava_no_mesmo_dia(repo):
+    """O índice parcial não conflita com o UNIQUE (corredor_id, activity_id) da v2."""
+    repo.salvar("p001", _atividade(id=1, date=_em("2026-01-01")))
+
+    repo.importar_historico(
+        "p001", [RegistroHistorico(day=date(2026, 1, 1), carga_km=5.0, tempo_total_s=1500)]
+    )
+
+    achadas = repo.por_dia("p001", date(2026, 1, 1))
+    assert len(achadas) == 2
+    assert {a.id for a in achadas} == {1, None}
+
+
+def test_tempo_desconhecido_vira_zero_e_loga(repo, caplog):
+    with caplog.at_level("WARNING"):
+        repo.importar_historico(
+            "p001", [RegistroHistorico(day=date(2026, 1, 1), carga_km=8.0, tempo_total_s=None)]
+        )
+
+    achada = repo.por_dia("p001", date(2026, 1, 1))[0]
+    assert achada.moving_time_s == 0
+    assert "sem tempo conhecido" in caplog.text
+
+
+def test_importar_historico_vazio_nao_toca_o_banco(repo):
+    assert repo.importar_historico("p001", []) == ResultadoGravacao(0, 0)
+
+
+def test_importar_so_dias_de_descanso_nao_grava_nada(repo):
+    resultado = repo.importar_historico(
+        "p001", [RegistroHistorico(day=date(2026, 1, 1), carga_km=0.0, tempo_total_s=0)]
+    )
+
+    assert resultado == ResultadoGravacao(0, 0)
+    assert repo.por_dia("p001", date(2026, 1, 1)) == ()
 
 
 # ---------------------------------------------------------------------- falhas

@@ -22,12 +22,23 @@ naquela aba**, com um WARNING no log — não interrompe a sincronização do
 corredor nem a gravação nas demais linhas/abas. O dado de pesquisa continua
 íntegro no SQLite; decidir se/quando abrir uma segunda planilha por corredor
 fica para quando o problema aparecer de verdade.
+
+Fase 5.5 (adoção de planilhas já preenchidas) acrescentou duas coisas:
+
+- **`ler_historico_manual`**: lê de volta o período `[start_date,
+  cutover_date)`, preenchido à mão antes do app existir — insumo da adoção,
+  que importa esse período para o SQLite sem tocar o Excel (ele já está lá).
+- **`sincronizar` nunca escreve antes de `cutover_date`** (é território
+  manual) e, com um `ultima_escrita` (o que o próprio app gravou da última
+  vez), detecta quando um humano editou a célula depois do corte — nesse caso
+  preserva o valor humano e não sobrescreve.
 """
 from __future__ import annotations
 
+import math
 import os
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -39,8 +50,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from src.models.corredor import Corredor
 from src.models.daily_load import DailyLoad
+from src.models.registro_historico import RegistroHistorico
 from src.utils.errors import (
     DataBaseDivergenteError,
+    GradeDesalinhadaError,
     PlanilhaEmUsoError,
     PlanilhaError,
     PlanilhaNaoEncontradaError,
@@ -81,6 +94,14 @@ class ResultadoExcel:
     # Depois do teto de cada aba — dado de pesquisa, mas sem linha para ir.
     dias_alem_do_limite_daily_data: int = 0
     dias_alem_do_limite_pace: int = 0
+    # Anteriores ao cutover_date — território do histórico manual (Fase 5.5).
+    dias_sob_gestao_manual: int = 0
+    # Célula divergia do que o app escreveu da última vez — editada à mão.
+    dias_preservados: int = 0
+    # (carga_km, tempo_total_s) de cada dia efetivamente escrito nesta
+    # execução — a baseline que a próxima sincronização deve receber de volta
+    # em `ultima_escrita`, para continuar detectando edição humana.
+    novas_escritas: Mapping[date, tuple[float, int]] = field(default_factory=dict)
 
     @property
     def dias_ignorados(self) -> int:
@@ -88,14 +109,41 @@ class ResultadoExcel:
             self.dias_descartados
             + self.dias_alem_do_limite_daily_data
             + self.dias_alem_do_limite_pace
+            + self.dias_sob_gestao_manual
+            + self.dias_preservados
         )
+
+
+@dataclass(frozen=True)
+class HistoricoManual:
+    """O que a planilha já tinha antes do corte — insumo da adoção (Fase 5.5)."""
+
+    registros: tuple[RegistroHistorico, ...]
+    # Dias no período manual sem data legível em B — a grade "contígua" nem
+    # sempre vale antes do app existir; reportado, não é erro.
+    lacunas: tuple[date, ...]
 
 
 class ExcelService:
     """Escreve o agregado diário nas abas Daily_Data e PACE, sem tocar fórmulas."""
 
-    def sincronizar(self, corredor: Corredor, daily_loads: Iterable[DailyLoad]) -> ResultadoExcel:
+    def sincronizar(
+        self,
+        corredor: Corredor,
+        daily_loads: Iterable[DailyLoad],
+        *,
+        ultima_escrita: Mapping[date, tuple[float, int]] | None = None,
+    ) -> ResultadoExcel:
         """Grava os `DailyLoad` na planilha do corredor.
+
+        `ultima_escrita` é o que o **próprio app** gravou da última vez em
+        cada dia (devolvido como `ResultadoExcel.novas_escritas` na
+        sincronização anterior; quem orquestra — Fase 6 — é quem guarda e
+        devolve isto). Sem ela, todo dia é escrito incondicionalmente, como na
+        Fase 5. Com ela, um dia cuja célula divergir do que está registrado é
+        tratado como **edição humana** e preservado, não sobrescrito — dias
+        anteriores ao `cutover_date` do corredor nunca são escritos, ponto:
+        aquele período é território do histórico manual (Fase 5.5).
 
         Raises:
             PlanilhaNaoEncontradaError: o corredor ainda não fez o onboarding
@@ -117,10 +165,13 @@ class ExcelService:
         self._validar_data_base(corredor, aba_daily)
 
         descartados = 0
+        sob_gestao_manual = 0
+        preservados = 0
         alem_daily = 0
         alem_pace = 0
         escritos_daily = 0
         escritos_pace = 0
+        novas_escritas: dict[date, tuple[float, int]] = {}
 
         for carga in loads:
             dia = corredor.dia_da_planilha(carga.day)
@@ -135,9 +186,35 @@ class ExcelService:
                 descartados += 1
                 continue
 
+            if carga.day < corredor.cutover_date:
+                logger.warning(
+                    "Corredor %s: %s está sob gestão manual (corte em %s) — "
+                    "não sobrescrito.",
+                    corredor,
+                    carga.day.isoformat(),
+                    corredor.cutover_date.isoformat(),
+                )
+                sob_gestao_manual += 1
+                continue
+
             linha = dia + 1
 
-            if _escrever_daily_data(aba_daily, linha, carga):
+            baseline = ultima_escrita.get(carga.day) if ultima_escrita else None
+            editado = baseline is not None and _foi_editado_a_mao(
+                aba_daily, aba_pace, linha, carga.day, baseline
+            )
+            if editado:
+                logger.warning(
+                    "Corredor %s: %s foi editado manualmente na planilha depois "
+                    "do corte — preservado, não sobrescrito.",
+                    corredor,
+                    carga.day.isoformat(),
+                )
+                preservados += 1
+                continue
+
+            escreveu_daily = _escrever_daily_data(aba_daily, linha, carga)
+            if escreveu_daily:
                 escritos_daily += 1
             else:
                 logger.warning(
@@ -165,12 +242,20 @@ class ExcelService:
                 )
                 alem_pace += 1
 
+            # A baseline segue Daily_Data (o teto de PACE é bem menor e mais
+            # comum de estourar; um dia sem PACE ainda é um dia gravado).
+            if escreveu_daily:
+                novas_escritas[carga.day] = (carga.carga_km, carga.tempo_total_s)
+
         resultado = ResultadoExcel(
             dias_escritos_daily_data=escritos_daily,
             dias_escritos_pace=escritos_pace,
             dias_descartados=descartados,
             dias_alem_do_limite_daily_data=alem_daily,
             dias_alem_do_limite_pace=alem_pace,
+            dias_sob_gestao_manual=sob_gestao_manual,
+            dias_preservados=preservados,
+            novas_escritas=novas_escritas,
         )
 
         if escritos_daily == 0 and escritos_pace == 0:
@@ -183,6 +268,58 @@ class ExcelService:
         self._salvar(corredor, workbook)
         logger.info("Corredor %s: planilha atualizada (%s).", corredor, resultado)
         return resultado
+
+    def ler_historico_manual(self, corredor: Corredor) -> HistoricoManual:
+        """Lê o período `[start_date, cutover_date)` — preenchido à mão, antes
+        do app existir.
+
+        Corredor novo (`start_date == cutover_date`, `not
+        corredor.adota_planilha_existente`) devolve vazio sem sequer abrir o
+        arquivo — não há período manual nenhum para ler.
+
+        Raises:
+            PlanilhaNaoEncontradaError / PlanilhaEmUsoError / PlanilhaError:
+                como em `sincronizar`.
+            GradeDesalinhadaError: uma linha tem data diferente da que a
+                posição dela na grade implica (linha inserida ou apagada à
+                mão na planilha).
+        """
+        if not corredor.adota_planilha_existente:
+            return HistoricoManual((), ())
+
+        workbook = self._abrir(corredor)
+        aba_daily = workbook[ABA_DAILY_DATA]
+        aba_pace = workbook[ABA_PACE]
+
+        self._validar_data_base(corredor, aba_daily)
+
+        registros: list[RegistroHistorico] = []
+        lacunas: list[date] = []
+
+        dia_atual = corredor.start_date
+        while dia_atual < corredor.cutover_date:
+            linha = corredor.dia_da_planilha(dia_atual) + 1
+
+            if linha > ULTIMA_LINHA_DAILY_DATA:
+                logger.warning(
+                    "Corredor %s: período manual vai além do limite de %s "
+                    "(linha %d) — parando a leitura em %s.",
+                    corredor,
+                    ABA_DAILY_DATA,
+                    ULTIMA_LINHA_DAILY_DATA,
+                    dia_atual.isoformat(),
+                )
+                break
+
+            registro = _ler_linha_historica(corredor, aba_daily, aba_pace, linha, dia_atual)
+            if registro is None:
+                lacunas.append(dia_atual)
+            else:
+                registros.append(registro)
+
+            dia_atual += timedelta(days=1)
+
+        return HistoricoManual(tuple(registros), tuple(lacunas))
 
     # --------------------------------------------------------------- interno
 
@@ -320,3 +457,108 @@ def _apagar(caminho: Path) -> None:
         caminho.unlink(missing_ok=True)
     except OSError:
         logger.debug("Não foi possível remover o temporário %s.", caminho)
+
+
+def _foi_editado_a_mao(
+    aba_daily: Worksheet,
+    aba_pace: Worksheet,
+    linha: int,
+    dia: date,
+    baseline: tuple[float, int],
+) -> bool:
+    """True se a célula atual não bate com o que o app escreveu da última vez.
+
+    Reconstrói o `DailyLoad` que o baseline representa para reaproveitar a
+    mesma regra de "dia de descanso" do escritor (Pace/Tempo em branco) — sem
+    isso, um `tempo_total_s=0` de baseline comparado contra uma célula em
+    branco pareceria uma edição humana que nunca aconteceu.
+    """
+    esperado = DailyLoad(day=dia, carga_km=baseline[0], tempo_total_s=baseline[1])
+
+    atual_carga = aba_daily.cell(row=linha, column=COL_CARGA).value
+    if not _numero_bate(atual_carga, esperado.carga_km):
+        return True
+
+    if linha <= ULTIMA_LINHA_PACE:
+        atual_tempo = aba_pace.cell(row=linha, column=COL_TEMPO).value
+        if not _tempo_bate(atual_tempo, esperado.tempo_total):
+            return True
+
+    return False
+
+
+def _numero_bate(atual: object, esperado: float) -> bool:
+    return isinstance(atual, int | float) and math.isclose(float(atual), esperado, abs_tol=1e-6)
+
+
+def _tempo_bate(atual: object, esperado: timedelta | None) -> bool:
+    if esperado is None:
+        return atual is None
+    return atual == esperado
+
+
+def _ler_linha_historica(
+    corredor: Corredor,
+    aba_daily: Worksheet,
+    aba_pace: Worksheet,
+    linha: int,
+    dia_esperado: date,
+) -> RegistroHistorico | None:
+    """Lê uma linha do período manual. `None` = lacuna (linha sem data legível).
+
+    Raises:
+        GradeDesalinhadaError: a data da linha não bate com a posição dela.
+    """
+    bruto = aba_daily.cell(row=linha, column=COL_DATA).value
+    data_lida = _como_data(bruto)
+    if data_lida is None:
+        if bruto is not None:
+            logger.warning(
+                "Corredor %s: %s!B%d=%r não é uma data reconhecível — tratada "
+                "como lacuna.",
+                corredor,
+                ABA_DAILY_DATA,
+                linha,
+                bruto,
+            )
+        return None
+
+    if data_lida != dia_esperado:
+        raise GradeDesalinhadaError(
+            f"corredor {corredor.id}: {ABA_DAILY_DATA}!B{linha}={data_lida.isoformat()} "
+            f"esperava {dia_esperado.isoformat()} — a grade parece ter linha inserida "
+            "ou apagada à mão; confira a planilha antes de rodar a adoção de novo"
+        )
+
+    carga_bruta = aba_daily.cell(row=linha, column=COL_CARGA).value
+    carga_km = _numero_ou_zero(corredor, ABA_DAILY_DATA, linha, carga_bruta)
+
+    tempo_total_s = None
+    if linha <= ULTIMA_LINHA_PACE:
+        tempo_bruto = aba_pace.cell(row=linha, column=COL_TEMPO).value
+        if isinstance(tempo_bruto, timedelta):
+            tempo_total_s = int(tempo_bruto.total_seconds())
+
+    return RegistroHistorico(day=dia_esperado, carga_km=carga_km, tempo_total_s=tempo_total_s)
+
+
+def _numero_ou_zero(corredor: Corredor, aba: str, linha: int, valor: object) -> float:
+    """Lê uma célula numérica do histórico manual; ilegível vira 0.0 com WARNING.
+
+    Uma planilha preenchida à mão pode ter texto solto ("descanso", "-") onde
+    a grade automática só teria número — não é motivo para abortar a adoção
+    inteira por causa de um dia.
+    """
+    if valor is None:
+        return 0.0
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Corredor %s: %s!C%d=%r não é numérico — tratado como 0.",
+            corredor,
+            aba,
+            linha,
+            valor,
+        )
+        return 0.0

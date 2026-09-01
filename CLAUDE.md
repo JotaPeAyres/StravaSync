@@ -12,9 +12,10 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
 - **Fase 2 (Configuração): concluída e na `main`** — config em duas camadas (`.env` global + `corredores.toml`), logging central, modelos (`Activity`, `DailyLoad`, `Corredor`), 54 testes. Branch `fase-2-configuracao` mergeada; pode ser apagada.
 - **Fase 3 (Strava): implementada na branch `fase-3-strava`**, ainda **não mergeada**. Entrega: hierarquia de exceções, tabela de estado por corredor no SQLite, `RateLimiter`, `StravaClient`, política OAuth (`utils/auth.py`), filtro/conversão de atividades e a CLI `src/inscricao.py`. 197 testes, tudo com `httpx.MockTransport` — **nenhuma credencial real foi usada**.
 - **Fase 4 (Banco): implementada e na `main`.** Entrega: schema v2 com `activities`, `ActivityRepository` com upsert, consultas por período e a marca d'água do `after=`. 238 testes.
-- **Fase 5 (Excel): implementada na branch `fase-5-excel`**, ainda **não mergeada**. Entrega: `ExcelService.sincronizar(corredor, daily_loads)`, escrevendo só `Daily_Data` (B/C) e `PACE` (B/C/D/E), validando `B2` como fonte da verdade, respeitando os tetos de cada aba e salvando de forma atômica (`.tmp.xlsx` + `os.replace`). Testado contra o **template real** (`Cópia de Planilha_carga_corrida.xlsx`), inclusive round-trip de fórmulas e named ranges. 256 testes.
-- **Pendência bloqueante para validar as Fases 3 e 4 de verdade**: registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — a Fase 5 (Excel) é local e já foi validada contra o template real.
-- **Próxima: Fase 6 (Regra de Negócio)** — `SyncService`/`ActivityService.aggregate_daily`, ligando Strava → SQLite → `ExcelService`.
+- **Fase 5 (Excel): implementada na branch `fase-5-excel`**, ainda **não mergeada**. Entrega: `ExcelService.sincronizar(corredor, daily_loads)`, escrevendo só `Daily_Data` (B/C) e `PACE` (B/C/D/E), validando `B2` como fonte da verdade, respeitando os tetos de cada aba e salvando de forma atômica (`.tmp.xlsx` + `os.replace`). Testado contra o **template real** (`Cópia de Planilha_carga_corrida.xlsx`), inclusive round-trip de fórmulas e named ranges.
+- **Fase 5.5 (Adoção de planilhas já preenchidas): implementada na branch `fase-5.5-adocao`** (criada a partir de `fase-5-excel`, que ainda não foi mergeada). Entrega: `ExcelService.ler_historico_manual` (lê o período `[start_date, cutover_date)` de volta), `ActivityRepository.importar_historico` (grava esse período no SQLite como origem `manual`, sem `activity_id`), `EscritaExcelRepository` + `ExcelService.sincronizar(..., ultima_escrita=...)` (detecta e preserva edição humana pós-corte) e `AdocaoService.adotar(corredor)` (a costura das duas pontas, com relatório). Schema do banco em v3. 287 testes.
+- **Pendência bloqueante para validar as Fases 3 e 4 de verdade**: registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — Fases 5 e 5.5 (Excel) são locais e já foram validadas contra o template real.
+- **Próxima: Fase 6 (Regra de Negócio)** — `SyncService`/`ActivityService.aggregate_daily`, ligando Strava → SQLite → `ExcelService`/`AdocaoService`. É quem decide *quando* rodar a adoção e como transportar a baseline (`EscritaExcelRepository`) em volta de cada `ExcelService.sincronizar`.
 
 ## Convenções de trabalho (IMPORTANTE)
 
@@ -72,10 +73,12 @@ src/
   services/activity_service.py         # ✅ Fase 3 (agregação: Fase 6)
   services/sync_service.py             # Fase 6 (orquestra tudo)
   services/excel_service.py            # ✅ Fase 5
-  services/database_service.py         # ✅ Fase 3 (schema v1) — v2 na Fase 4
-  models/activity.py, models/daily_load.py, models/corredor.py ✅
-  repositories/activity_repository.py  # ✅ Fase 4
+  services/database_service.py         # ✅ Fase 3 (schema v1) — v2 na Fase 4, v3 na Fase 5.5
+  services/adocao_service.py           # ✅ Fase 5.5
+  models/activity.py, models/daily_load.py, models/corredor.py, models/registro_historico.py ✅
+  repositories/activity_repository.py  # ✅ Fase 4 (+ importar_historico na Fase 5.5)
   repositories/corredor_state_repository.py  # ✅ Fase 3
+  repositories/escrita_excel_repository.py   # ✅ Fase 5.5
   utils/config.py ✅, logger.py ✅, auth.py (Fase 3)
   main.py (executável), scheduler.py   # Fase 7
 tests/            # pytest
@@ -181,13 +184,14 @@ Migração **aditiva** por `PRAGMA user_version`: `if versao < 1:` cria
   composta, o pior caso é linha duplicada (visível), não dado atribuído à pessoa
   errada.
 - **`activity_id` é anulável** e existe a coluna `origem` (`strava` | `manual`) —
-  acomoda desde já o histórico manual da Fase 5.5, evitando migrar depois uma
-  tabela cheia de dados de pesquisa. ⚠️ O `ON CONFLICT` **não dispara** com
-  `activity_id NULL`: reimportar histórico manual duplicaria. Há um
-  `TODO(Fase 5.5)` no `database_service.py` pedindo o índice parcial em v3.
+  acomoda o histórico manual. ⚠️ O `ON CONFLICT (corredor_id, activity_id)`
+  **não dispara** com `activity_id NULL`: reimportar histórico manual
+  duplicaria. Resolvido na Fase 5.5 com um índice **parcial** em v3 — ver
+  seção própria abaixo.
 - **Sem FOREIGN KEY** para `corredor_state`: aquilo é cache do OAuth, não
-  cadastro (quem existe na pesquisa é o `corredores.toml`). A Fase 5.5 precisa
-  adotar planilha de quem ainda não autorizou; uma FK viraria erro.
+  cadastro (quem existe na pesquisa é o `corredores.toml`). A adoção (Fase
+  5.5) importa histórico de corredores que ainda não autorizaram; uma FK
+  viraria erro.
 - **`pace` não é coluna.** É função de distância e tempo, e o pace da pesquisa é o
   **diário** (Σ tempo ÷ Σ km), que não é a média dos paces por atividade. A regra
   geral: guardamos o que a fonte afirma (`average_speed`), não o que calculamos.
@@ -307,12 +311,127 @@ depender de `openpyxl` nem de nada do projeto, como o resto do módulo.
 
 ### Pendências que a Fase 5 empurra adiante
 
-- **Fase 5.5** decide o que fazer com planilha adotada (histórico manual antes
-  do `cutover_date`) — `ExcelService` já respeita `B2` como fonte da verdade,
-  mas ainda não lê "até onde a planilha já foi preenchida à mão".
-- **Fase 6** é quem decide *o que* mandar para `sincronizar()`: filtrar por
-  `cutover_date`, agregar do banco (`por_dia`), e reescrever os
-  `dias_afetados` do `ResultadoGravacao` da Fase 4.
+- **Fase 6** é quem decide *o que* mandar para `sincronizar()`: agregar do
+  banco (`por_dia`), reescrever os `dias_afetados` do `ResultadoGravacao` da
+  Fase 4, e orquestrar a baseline de edição humana (`ultima_escrita`/
+  `EscritaExcelRepository`, ver Fase 5.5 abaixo).
 - Se um dia a pesquisa decidir abrir uma segunda planilha por corredor quando
   a grade esgotar, o ponto de entrada é o `WARNING` de "além do limite" — hoje
   só logado, o dado permanece no SQLite.
+
+## Fase 5.5 (Adoção de planilhas já preenchidas) — como ficou
+
+### Schema v3
+
+Duas estruturas aditivas, no mesmo `if versao < 3:`:
+
+- **Índice parcial** `UNIQUE (corredor_id, day) WHERE activity_id IS NULL` —
+  resolve a lacuna que a Fase 4 já tinha previsto: o `UNIQUE (corredor_id,
+  activity_id)` da v2 não dispara com `activity_id NULL` (o SQLite trata cada
+  `NULL` como distinto), então sem este índice rodar a adoção duas vezes
+  duplicaria o período manual inteiro a cada vez.
+- **Tabela `excel_escritas`** (`corredor_id, day, carga_km, tempo_total_s,
+  atualizado_em`) — o último valor que o **próprio app** escreveu em cada dia.
+  Existe só para uma comparação: célula atual × este valor. Se divergirem, foi
+  um humano; se baterem, é o app escrevendo de novo (rotina).
+
+### `ExcelService.ler_historico_manual(corredor)`
+
+Lê `[start_date, cutover_date)` de volta como `RegistroHistorico` (day,
+carga_km, `tempo_total_s: int | None`). Corredor novo (`start_date ==
+cutover_date`) devolve vazio sem abrir o arquivo.
+
+- **`tempo_total_s=None`** quando `PACE` não cobre o dia (grid menor que
+  `Daily_Data`, ou célula em branco dentro do grid) — a distância ainda entra
+  (enriquece a pesquisa), só sem como calcular o pace daquele dia.
+- **Lacuna (linha com `B` em branco) não é erro** — uma planilha mantida à
+  mão antes do app existir pode ter buracos reais. Vai para
+  `HistoricoManual.lacunas`, não interrompe a leitura dos outros dias.
+- **`GradeDesalinhadaError` é erro**, e é outra coisa: a linha *tem* data,
+  mas ela não bate com o que a posição implica (`dia = (data -
+  start_date).days + 1`). Sinal de linha inserida/apagada à mão — dali para
+  frente todo mapeamento data→linha estaria errado. Correção é humana, na
+  planilha; o código não tenta adivinhar o realinhamento.
+- Célula de carga não-numérica (texto solto tipo `"descanso"`) vira `0.0` com
+  `WARNING`, em vez de abortar a adoção inteira por causa de um dia.
+- Reusa `_validar_data_base` (mesma checagem de `B2` do `sincronizar`) — não
+  faz sentido importar histórico de uma planilha cuja base já diverge do
+  cadastro.
+
+### `ActivityRepository.importar_historico`
+
+Upsert dedicado, com `_SQL_UPSERT_MANUAL` mirando o índice parcial em vez do
+`UNIQUE (corredor_id, activity_id)` da Fase 4.
+
+- **Só `RegistroHistorico.tem_corrida` vira linha** — dia de descanso nunca é
+  uma atividade, nem quando a sincronização é do Strava (que também nunca
+  cria uma linha para um dia sem corrida).
+- **`start_date_utc` fica `NULL` de propósito**: não há hora exata de uma
+  corrida digitada à mão, e `ultimo_evento_em` (a marca d'água do `after=`)
+  já ignora linhas assim — histórico manual não pode empurrar a busca do
+  Strava.
+- **`tempo_total_s=None` vira `moving_time_s=0`**, com `WARNING` — a distância
+  entra, mas fica registrado que o pace daquele dia é indeterminado.
+
+### Detecção de edição humana — `ExcelService.sincronizar(..., ultima_escrita=...)`
+
+Parâmetro novo, opcional e retrocompatível: sem ele, o comportamento é
+idêntico ao da Fase 5 (todo dia é escrito incondicionalmente).
+
+- **A baseline é reconstruída como um `DailyLoad`** antes de comparar — não
+  dá para comparar `tempo_total_s` cru contra a célula, porque em dia de
+  descanso a célula de `PACE` fica **em branco**, não `0`. Reaproveitar
+  `DailyLoad.tempo_total`/`is_rest_day` evita que todo dia de descanso pareça
+  "editado à mão" na segunda sincronização.
+- **Dia anterior ao `cutover_date` nunca é escrito**, ponto — nem chega a
+  olhar a baseline. Esse período é território do histórico manual;
+  `dias_sob_gestao_manual` conta quantos foram descartados assim.
+- **Dia editado à mão é preservado, não sobrescrito** (`dias_preservados`) —
+  e a preservação é **permanente**: como o dia não entra em
+  `ResultadoExcel.novas_escritas`, a baseline gravada continua sendo a
+  antiga, e a próxima sincronização vai flagrar a mesma divergência de novo.
+  Não existe hoje um jeito de "destravar" um dia — não estava no escopo
+  documentado, e adicionar um teria sido antecipar requisito não pedido.
+- **`novas_escritas` segue `Daily_Data`, não `PACE`**: o teto de `PACE` é bem
+  menor e mais fácil de estourar; um dia sem `PACE` ainda é um dia gravado
+  (baseline não pode ficar "incompleta" por isso).
+- Quem guarda e devolve `ultima_escrita`/`novas_escritas` entre execuções é a
+  Fase 6 — `ExcelService` continua sem tocar o SQLite, de propósito.
+
+### `AdocaoService.adotar(corredor)`
+
+A costura: `ExcelService.ler_historico_manual` → filtra o que entra no
+relatório (lacunas, dias sem tempo) → `ActivityRepository.importar_historico`
+→ `ResultadoAdocao`. **Nunca escreve no Excel** — esse histórico já está lá;
+só o SQLite precisa ser alimentado. Idempotente: rodar de novo com a planilha
+inalterada reimporta o mesmo período e atualiza as mesmas linhas (via o
+índice parcial), sem duplicar.
+
+### Erros novos em `utils/errors.py`
+
+`GradeDesalinhadaError(PlanilhaError)` — linha da grade com data que não bate
+com a posição dela (ver `ler_historico_manual` acima).
+
+### `Activity.id` virou `int | None`
+
+Era `int` obrigatório desde a Fase 3. Histórico manual não tem `activity_id`
+do Strava, e o valor precisa sobreviver ao ciclo completo — gravado como
+`NULL`, lido de volta via `_para_modelo` em `por_dia`/`por_periodo` — sem
+violar o tipo declarado. Campo movido para depois dos obrigatórios no
+dataclass (`id: int | None = None`, logo após `elapsed_time_s`); nenhum call
+site quebrou porque todos já construíam `Activity` por *keyword arguments*.
+Um teste da própria Fase 4 (`test_atividades_manuais_sem_activity_id_convivem`)
+já exercitava `id=None` — o tipo só passou a refletir o que já era verdade.
+
+### Pendências que a Fase 5.5 empurra para a Fase 6
+
+- **Quando rodar a adoção** — uma vez, no onboarding do corredor? A cada
+  execução (idempotente, então seguro, mas redundante depois da primeira)?
+  Decisão do `SyncService`, não de `AdocaoService`.
+- **Carregar/salvar a baseline em volta de `sincronizar()`**: buscar
+  `EscritaExcelRepository.carregar(corredor_id)` antes de chamar
+  `ExcelService.sincronizar`, e `registrar_muitas(corredor_id,
+  resultado.novas_escritas)` depois — hoje nada faz essa ponte.
+- **Sem jeito de destravar um dia preservado** (edição humana permanente,
+  ver acima) — se a pesquisa precisar disso, é escopo novo, não uma correção
+  do que já existe.

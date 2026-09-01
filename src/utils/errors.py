@@ -167,3 +167,13 @@ class DataBaseDivergenteError(PlanilhaError):
     encontra isto precisa corrigir o `corredores.toml` para bater com a
     planilha, não o contrário.
     """
+
+
+class GradeDesalinhadaError(PlanilhaError):
+    """Uma linha da grade não tem a data que a posição dela implica.
+
+    Sinal de que alguém inseriu ou apagou uma linha na planilha à mão — a
+    partir daí, `dia = (data - start_date).days + 1` não aponta mais para a
+    linha certa, e escrever ali colocaria carga no dia errado. Levantado ao
+    ler o período manual (Fase 5.5); a correção é humana, na própria planilha.
+    """
