@@ -176,6 +176,27 @@ class ActivityRepository:
         # banco quebra essa ordenação sem erro nenhum.
         return de_texto(linha["ultimo"]) if linha is not None else None
 
+    def por_start_date_utc(self, corredor_id: str, desde: datetime) -> tuple[Activity, ...]:
+        """Atividades de origem Strava com `start_date_utc >= desde`.
+
+        Base da detecção de atividade apagada (Fase 6): para o mesmo `after=`
+        usado numa busca, tudo aqui deveria ter voltado na resposta do Strava
+        — o que não voltou foi excluído por lá, sem custar requisição nenhuma
+        para descobrir.
+
+        Linhas manuais (`activity_id IS NULL`) nunca aparecem: elas não têm
+        contrapartida no Strava para "sumir".
+        """
+        linhas = self._executar(
+            f"""
+            SELECT {_COLUNAS} FROM activities
+             WHERE corredor_id = ? AND activity_id IS NOT NULL AND start_date_utc >= ?
+             ORDER BY start_date_utc
+            """,
+            (corredor_id, para_texto(desde)),
+        ).fetchall()
+        return tuple(_para_modelo(linha) for linha in linhas)
+
     def importar_historico(
         self, corredor_id: str, registros: Iterable[RegistroHistorico]
     ) -> ResultadoGravacao:

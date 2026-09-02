@@ -5,10 +5,11 @@ errado desloca a corrida de dia — e dia errado é **linha errada da planilha**
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
+from src.models.activity import Activity
 from src.services.activity_service import ActivityService
 from src.utils.errors import InvalidResponseError
 
@@ -193,6 +194,44 @@ def test_converte_lista_preservando_a_ordem(servico):
     assert [a.id for a in atividades] == [1, 2, 3]
 
 
-def test_agregacao_diaria_continua_na_fase_6(servico):
-    with pytest.raises(NotImplementedError):
-        servico.aggregate_daily([])
+# -------------------------------------------------------------- agregação
+
+
+def _atividade(**overrides) -> Activity:
+    padrao = {
+        "name": "Corrida",
+        "date": datetime(2026, 1, 1, 7, 0),  # noqa: DTZ001 — local e ingênuo, como o modelo
+        "distance_m": 10_000.0,
+        "moving_time_s": 3000,
+        "elapsed_time_s": 3100,
+    }
+    return Activity(**{**padrao, **overrides})
+
+
+def test_agrega_uma_corrida(servico):
+    carga = servico.aggregate_daily(date(2026, 1, 1), [_atividade(distance_m=10_000.0, moving_time_s=3000)])
+
+    assert carga.day == date(2026, 1, 1)
+    assert carga.carga_km == 10.0
+    assert carga.tempo_total_s == 3000
+
+
+def test_soma_duas_corridas_do_mesmo_dia(servico):
+    carga = servico.aggregate_daily(
+        date(2026, 1, 1),
+        [
+            _atividade(distance_m=5_000.0, moving_time_s=1500),
+            _atividade(distance_m=3_000.0, moving_time_s=900),
+        ],
+    )
+
+    assert carga.carga_km == 8.0
+    assert carga.tempo_total_s == 2400
+
+
+def test_dia_sem_corridas_e_dia_de_descanso(servico):
+    carga = servico.aggregate_daily(date(2026, 1, 1), [])
+
+    assert carga.is_rest_day is True
+    assert carga.carga_km == 0.0
+    assert carga.tempo_total_s == 0

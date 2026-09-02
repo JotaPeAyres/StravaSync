@@ -13,9 +13,10 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
 - **Fase 3 (Strava): implementada na branch `fase-3-strava`**, ainda **não mergeada**. Entrega: hierarquia de exceções, tabela de estado por corredor no SQLite, `RateLimiter`, `StravaClient`, política OAuth (`utils/auth.py`), filtro/conversão de atividades e a CLI `src/inscricao.py`. 197 testes, tudo com `httpx.MockTransport` — **nenhuma credencial real foi usada**.
 - **Fase 4 (Banco): implementada e na `main`.** Entrega: schema v2 com `activities`, `ActivityRepository` com upsert, consultas por período e a marca d'água do `after=`. 238 testes.
 - **Fase 5 (Excel): implementada na branch `fase-5-excel`**, ainda **não mergeada**. Entrega: `ExcelService.sincronizar(corredor, daily_loads)`, escrevendo só `Daily_Data` (B/C) e `PACE` (B/C/D/E), validando `B2` como fonte da verdade, respeitando os tetos de cada aba e salvando de forma atômica (`.tmp.xlsx` + `os.replace`). Testado contra o **template real** (`Cópia de Planilha_carga_corrida.xlsx`), inclusive round-trip de fórmulas e named ranges.
-- **Fase 5.5 (Adoção de planilhas já preenchidas): implementada na branch `fase-5.5-adocao`** (criada a partir de `fase-5-excel`, que ainda não foi mergeada). Entrega: `ExcelService.ler_historico_manual` (lê o período `[start_date, cutover_date)` de volta), `ActivityRepository.importar_historico` (grava esse período no SQLite como origem `manual`, sem `activity_id`), `EscritaExcelRepository` + `ExcelService.sincronizar(..., ultima_escrita=...)` (detecta e preserva edição humana pós-corte) e `AdocaoService.adotar(corredor)` (a costura das duas pontas, com relatório). Schema do banco em v3. 287 testes.
-- **Pendência bloqueante para validar as Fases 3 e 4 de verdade**: registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — Fases 5 e 5.5 (Excel) são locais e já foram validadas contra o template real.
-- **Próxima: Fase 6 (Regra de Negócio)** — `SyncService`/`ActivityService.aggregate_daily`, ligando Strava → SQLite → `ExcelService`/`AdocaoService`. É quem decide *quando* rodar a adoção e como transportar a baseline (`EscritaExcelRepository`) em volta de cada `ExcelService.sincronizar`.
+- **Fase 5.5 (Adoção de planilhas já preenchidas): implementada, na branch `fase-6-regras`** (o histórico de branches ficou `fase-5-excel` → `fase-5.5-adocao` → `fase-6-regras`, nenhuma mergeada ainda). Entrega: `ExcelService.ler_historico_manual` (lê o período `[start_date, cutover_date)` de volta), `ActivityRepository.importar_historico` (grava esse período no SQLite como origem `manual`, sem `activity_id`), `EscritaExcelRepository` + `ExcelService.sincronizar(..., ultima_escrita=...)` (detecta e preserva edição humana pós-corte) e `AdocaoService.adotar(corredor)` (a costura das duas pontas, com relatório). Schema do banco em v3.
+- **Fase 6 (Regra de Negócio): implementada na branch `fase-6-regras`**, ainda **não mergeada**. Entrega: `ActivityService.aggregate_daily`, `SyncService.sincronizar(corredor)` (a costura Strava → SQLite → Excel de **um** corredor) e o `main.py` reescrito — cria `StravaClient`/`RateLimiter`/`DatabaseService` uma única vez, percorre o cadastro isolando falha por corredor, exatamente como o pseudocódigo já especificado abaixo. Detecção de atividade apagada no Strava, preenchimento contíguo dos dias sem corrida e reescrita dos `dias_afetados` (corrida que muda de data) também entraram aqui. 309 testes.
+- **Pendência bloqueante para validar de verdade** (Fases 3 a 6 dependem do Strava real): registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — tudo até aqui foi validado com `httpx.MockTransport` e o template real do Excel.
+- **Próxima: Fase 7 (Scheduler)** — execução diária automática, dimensionamento da janela para 50+ corredores, alerta quando um corredor falha várias execuções seguidas.
 
 ## Convenções de trabalho (IMPORTANTE)
 
@@ -70,8 +71,8 @@ Template: `Cópia de Planilha_carga_corrida.xlsx` (copiado por corredor). O app 
 src/
   api/strava_client.py                 # ✅ Fase 3
   api/rate_limiter.py                  # ✅ Fase 3
-  services/activity_service.py         # ✅ Fase 3 (agregação: Fase 6)
-  services/sync_service.py             # Fase 6 (orquestra tudo)
+  services/activity_service.py         # ✅ Fase 3 (+ aggregate_daily na Fase 6)
+  services/sync_service.py             # ✅ Fase 6
   services/excel_service.py            # ✅ Fase 5
   services/database_service.py         # ✅ Fase 3 (schema v1) — v2 na Fase 4, v3 na Fase 5.5
   services/adocao_service.py           # ✅ Fase 5.5
@@ -150,9 +151,11 @@ Espaça as chamadas por relógio **monotônico**; lê `X-RateLimit-Limit`/`X-Rat
 
 ### O `after=` (armadilha mais séria da fase)
 
-O `after=` filtra por `start_date` em **UTC**, não pelo horário local. E usar o relógio da última execução perderia **para sempre** uma corrida de domingo enviada na terça — daí as duas colunas separadas: `ultima_sincronizacao` (quando rodamos) e `ultimo_evento_em` (o `start_date` UTC mais recente visto, que só avança). A fórmula da Fase 6 é `max(meia-noite UTC de cutover_date, ultimo_evento_em − 2 dias)`; **a data-base é `cutover_date`, não `start_date`**.
+O `after=` filtra por `start_date` em **UTC**, não pelo horário local. E usar o relógio da última execução perderia **para sempre** uma corrida de domingo enviada na terça — daí as duas colunas separadas: `ultima_sincronizacao` (quando rodamos) e `ultimo_evento_em` (o `start_date` UTC mais recente visto, que só avança). A fórmula, implementada em `SyncService._calcular_after` na Fase 6, é `max(meia-noite UTC de cutover_date, ultimo_evento_em − 2 dias)`; **a data-base é `cutover_date`, não `start_date`**.
 
-### Consumo das exceções no `main.py` — especificado, implementação na Fase 6
+⚠️ **Existem dois `ultimo_evento_em`** — não confundir. `corredor_state.ultimo_evento_em` (Fase 3, escrito por `CorredorStateRepository.registrar_sincronizacao`) e `ActivityRepository.ultimo_evento_em()` (Fase 4, `MAX(start_date_utc)` sobre `activities`). O `SyncService` usa **o da Fase 4** para o `after=` — é o mais forte dos dois, porque só avança quando a atividade *de fato foi persistida* (ver a razão em "Fase 4 › ActivityRepository" abaixo). O de `corredor_state` continua sendo gravado (via `registrar_sincronizacao`, no fim de `sincronizar()`) só para auditoria/monitoramento — a Fase 7 pode querer ler `ultima_sincronizacao` de lá.
+
+### Consumo das exceções no `main.py` — implementado na Fase 6
 
 ```
 cria UMA vez: DatabaseService, RateLimiter, StravaClient
@@ -161,6 +164,11 @@ por corredor: marcado precisa_reinscricao? → WARNING e pula (0 requisições)
   except RevokedTokenError:    marca reinscrição; falhas += 1; continua
   except (AuthorizationError, StravaError): falhas += 1; continua
 ```
+
+A pré-checagem de `precisa_reinscricao` é o detalhe fácil de perder: ela mora em
+`main.py::_precisa_reinscricao`, **fora** do bloco `try`, porque só assim um corredor já
+conhecidamente pendente não conta como falha *desta* execução — a mesma `RevokedTokenError`
+levantada *durante* uma tentativa (descoberta agora) conta.
 
 ### Pendências e riscos vivos
 
@@ -243,14 +251,10 @@ corrompe dado.
   `corredor_state` (onde vira `None`): ali custa uma página de API, aqui faria a
   corrida **sumir da agregação** e subnotificar a carga sem sinal nenhum.
 
-### Pendências que a Fase 4 empurra para a Fase 6
+### O que a Fase 6 fez com essas pendências
 
-- Agregar a partir do **banco** (`por_dia`), não do retorno da API.
-- Reescrever também os `dias_afetados`.
-- **Atividade apagada no Strava não é detectada**: ela só para de aparecer, e a
-  carga fantasma fica na planilha e no ACWR. A reconciliação é barata (tudo com
-  `start_date_utc >= after` deveria ter voltado) e o comportamento deve ser
-  **logar, não apagar**.
+Agregação a partir do banco, reescrita de `dias_afetados` e detecção de atividade apagada —
+todas implementadas em `SyncService`; ver a seção própria "Fase 6" abaixo.
 
 ## Fase 5 (Excel) — como ficou
 
@@ -311,10 +315,9 @@ depender de `openpyxl` nem de nada do projeto, como o resto do módulo.
 
 ### Pendências que a Fase 5 empurra adiante
 
-- **Fase 6** é quem decide *o que* mandar para `sincronizar()`: agregar do
-  banco (`por_dia`), reescrever os `dias_afetados` do `ResultadoGravacao` da
-  Fase 4, e orquestrar a baseline de edição humana (`ultima_escrita`/
-  `EscritaExcelRepository`, ver Fase 5.5 abaixo).
+- ~~Fase 6 decide o que mandar para `sincronizar()`~~ — feito: `SyncService`
+  agrega do banco, reescreve `dias_afetados` e orquestra a baseline de edição
+  humana (ver "Fase 6" abaixo).
 - Se um dia a pesquisa decidir abrir uma segunda planilha por corredor quando
   a grade esgotar, o ponto de entrada é o `WARNING` de "além do limite" — hoje
   só logado, o dado permanece no SQLite.
@@ -423,15 +426,93 @@ site quebrou porque todos já construíam `Activity` por *keyword arguments*.
 Um teste da própria Fase 4 (`test_atividades_manuais_sem_activity_id_convivem`)
 já exercitava `id=None` — o tipo só passou a refletir o que já era verdade.
 
-### Pendências que a Fase 5.5 empurra para a Fase 6
+### O que a Fase 6 decidiu sobre essas pendências
 
-- **Quando rodar a adoção** — uma vez, no onboarding do corredor? A cada
-  execução (idempotente, então seguro, mas redundante depois da primeira)?
-  Decisão do `SyncService`, não de `AdocaoService`.
-- **Carregar/salvar a baseline em volta de `sincronizar()`**: buscar
-  `EscritaExcelRepository.carregar(corredor_id)` antes de chamar
-  `ExcelService.sincronizar`, e `registrar_muitas(corredor_id,
-  resultado.novas_escritas)` depois — hoje nada faz essa ponte.
-- **Sem jeito de destravar um dia preservado** (edição humana permanente,
-  ver acima) — se a pesquisa precisar disso, é escopo novo, não uma correção
-  do que já existe.
+- **Quando rodar a adoção**: **a cada execução**, para todo corredor com
+  `adota_planilha_existente`. É idempotente (índice parcial da Fase 5.5) e o
+  custo é ler de volta um período limitado (≤365 dias); uma marca de "já
+  adotado" foi cogitada e descartada por criar estado novo para economizar
+  I/O local irrelevante — ver `SyncService._adotar_se_aplicavel`.
+- **Baseline em volta de `sincronizar()`**: feito em `SyncService.sincronizar`
+  — carrega antes, `ExcelService.sincronizar(..., ultima_escrita=baseline)`,
+  grava `resultado_excel.novas_escritas` depois.
+- **Sem jeito de destravar um dia preservado** continua **verdade** — não
+  mudou na Fase 6, e não estava no escopo dela.
+
+## Fase 6 (Regra de Negócio) — como ficou
+
+### `SyncService.sincronizar(corredor)` — um corredor por chamada
+
+Ordem dos passos, e por quê:
+
+1. **Adoção** (`_adotar_se_aplicavel`), se `corredor.adota_planilha_existente`. Primeiro porque
+   é local (sem rede) e não interage com o resto — se a planilha manual estiver corrompida
+   (`GradeDesalinhadaError`), o corredor falha aqui, antes de gastar uma requisição.
+2. **`after=`** (`_calcular_after`) — a fórmula travada: `max(meia-noite UTC de cutover_date,
+   ultimo_evento_em − 2 dias)`. `ultimo_evento_em` vem de `ActivityRepository`, não de
+   `corredor_state` (ver a nota "dois `ultimo_evento_em`" acima).
+3. **Busca + renovação** via `auth.chamar_renovando` — reaproveita a política inteira da Fase 3
+   (renova uma vez em 401, marca reinscrição em revogação) sem duplicar nada aqui.
+4. **Filtra e converte** (`_converter_tolerando_falhas`): `only_runs` primeiro, depois
+   `to_activity` **um por um** — uma atividade malformada vira WARNING e é descartada, o lote
+   segue. Abortar o corredor inteiro por causa de uma corrida com campo faltando seria
+   desproporcional ao mesmo princípio de isolamento que rege a execução como um todo.
+5. **Grava** (`ActivityRepository.salvar_muitas`) — upsert, dedupe, `dias_afetados`; nada novo,
+   só chamado.
+6. **Detecta apagadas** (`_detectar_apagadas`) — zero requisição extra, usa o `payloads` já
+   buscado no passo 3.
+7. **Decide os dias a escrever** (`_dias_para_escrever` — ver seção própria abaixo).
+8. **Agrega do banco**: `ActivityService.aggregate_daily(dia, ActivityRepository.por_dia(...))`
+   para cada dia decidido no passo 7 — nunca a partir do `payloads` cru.
+9. **Escreve o Excel** com a baseline carregada/salva em volta (`EscritaExcelRepository`).
+10. **Atualiza `corredor_state`** (`ultima_sincronizacao`, e `ultimo_evento_em` como espelho de
+    auditoria — a fonte de verdade continua sendo `ActivityRepository`).
+
+### `_dias_para_escrever`: por que não basta `dias_afetados`
+
+Este é o ponto mais fácil de fazer errado na fase. `dias_afetados` (Fase 4) só contém dias que
+**mudaram no banco nesta execução** — uma corrida nova, uma corrida corrigida, ou o dia antigo
+de uma corrida que mudou de data. Um dia sem corrida nenhuma (um descanso comum, ou
+simplesmente "hoje") **nunca** aparece ali. Se `SyncService` escrevesse só `dias_afetados`, a
+grade do Excel — que os named ranges (`DatasDiarias`, `ACWR_EWMA`, ...) pressupõem contígua via
+`COUNTA` — ficaria com buracos permanentes.
+
+A solução reaproveita a baseline que a Fase 5.5 já persiste (`EscritaExcelRepository`): o maior
+dia já escrito (`max(baseline, default=cutover_date - 1 dia)`) diz onde a planilha parou. A
+janela de escrita é `[max(ultimo_dia_escrito + 1, cutover_date), hoje]`, contígua, **em união**
+com `dias_afetados` (que alcança dias fora dessa janela recente).
+
+Consequência que vale registrar: isso torna a escrita **self-healing** entre execuções. Se o
+agendador (Fase 7, ainda não existe) pular alguns dias, a próxima execução simplesmente
+completa a janela inteira de uma vez — não há necessidade de um mecanismo de recuperação à
+parte. `hoje` é injetável (`Callable[[], date]`, padrão `datetime.now(UTC).date()`), o que é o
+que torna esse comportamento testável sem mockar relógio de verdade.
+
+### Atividade apagada no Strava — `ActivityRepository.por_start_date_utc` (novo)
+
+`SELECT ... WHERE activity_id IS NOT NULL AND start_date_utc >= ?` — o filtro por
+`activity_id IS NOT NULL` exclui linhas manuais de propósito: elas não têm contrapartida no
+Strava para "sumir", e apareceriam como falsos positivos em todo corredor adotado.
+
+A comparação usa os ids do `payloads` **completo** (antes do filtro `only_runs`), não só das
+corridas: uma atividade retipada (deixou de ser `Run`) não deveria disparar o alarme de
+"apagada" — ela só deixou de interessar à pesquisa, o que é uma categoria de evento diferente e
+não tratada agora. **Loga, não apaga**: a linha continua no banco e na planilha até alguém
+decidir o contrário.
+
+### Erros novos
+
+Nenhum. A fase inteira roda com o vocabulário de exceções que já existia (`utils/errors.py`);
+o que mudou foi só o pseudocódigo de `main.py` deixar de ser pseudocódigo.
+
+### Pendências que a Fase 6 deixa para depois
+
+- **Sem jeito de "destravar" um dia preservado por edição humana** — permanece assim desde a
+  Fase 5.5; não estava no escopo da Fase 6.
+- **`SyncService` não sabe que "hoje" pode ser diferente por fuso** — usa UTC por padrão para
+  o limite superior da janela de escrita. Um corredor num fuso muito adiantado poderia ver "o
+  dia de hoje" só aparecer no dia seguinte, na pior das hipóteses — auto-corrige na execução
+  seguinte, então não foi tratado como bug.
+- **Fase 7 (Scheduler)** decide a cadência real das execuções, o dimensionamento da janela para
+  50+ corredores, e como alertar quando um corredor falha várias vezes seguidas (`falhas` hoje
+  só é um contador por execução, sem memória entre execuções).

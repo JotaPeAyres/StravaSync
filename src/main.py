@@ -1,16 +1,29 @@
 """Ponto de entrada da aplicação StravaSync.
 
 A cada execução, percorre **todos** os participantes da pesquisa: busca as
-corridas de cada um, agrega por dia e atualiza a planilha dele. A lógica real é
-implementada nas Fases 3-6; por enquanto este módulo carrega a configuração,
-liga o logging e percorre o cadastro (Fase 2).
+corridas de cada um, agrega por dia e atualiza a planilha dele. `StravaClient`
+e `RateLimiter` são criados **uma única vez** — o limite de vazão é da
+aplicação inteira, dividido por todos os corredores, e um cliente por
+participante derrotaria o controle.
 """
 from __future__ import annotations
 
+import sqlite3
 import sys
 
+from src.api.rate_limiter import RateLimiter
+from src.api.strava_client import StravaClient
 from src.models.corredor import Corredor
+from src.repositories.activity_repository import ActivityRepository
+from src.repositories.corredor_state_repository import CorredorStateRepository
+from src.repositories.escrita_excel_repository import EscritaExcelRepository
+from src.services.activity_service import ActivityService
+from src.services.adocao_service import AdocaoService
+from src.services.database_service import DatabaseService
+from src.services.excel_service import ExcelService
+from src.services.sync_service import SyncService
 from src.utils.config import Config, ConfigError, load_config
+from src.utils.errors import AuthorizationError, QuotaExhaustedError, RevokedTokenError, StravaError
 from src.utils.logger import get_logger, setup_logging
 
 logger = get_logger(__name__)
@@ -29,7 +42,17 @@ def main() -> int:
     setup_logging(level=config.log_level, log_file=config.log_file)
     logger.info("StravaSync iniciando — %s", config.safe_summary())
 
-    falhas = sincronizar_todos(config)
+    database = DatabaseService(config.database_path)
+    try:
+        database.init_schema()
+        conn = database.connect()
+
+        sync_service = _montar_sync_service(config, conn)
+        corredor_state = CorredorStateRepository(conn)
+
+        falhas = sincronizar_todos(config, sync_service, corredor_state)
+    finally:
+        database.close()
 
     if falhas:
         logger.error("Sincronização terminou com %d corredor(es) com falha.", falhas)
@@ -39,34 +62,94 @@ def main() -> int:
     return 0
 
 
-def sincronizar_todos(config: Config) -> int:
+def _montar_sync_service(config: Config, conn: sqlite3.Connection) -> SyncService:
+    """Constrói o `SyncService` com uma instância única de cliente e limitador."""
+    limiter = RateLimiter(
+        pausa_s=config.strava_pausa_entre_chamadas_s,
+        reserva=config.strava_reserva_de_vazao,
+    )
+    client = StravaClient(
+        config.strava_client_id,
+        config.strava_client_secret,
+        limiter=limiter,
+        timeout_s=config.strava_timeout_s,
+    )
+    activity_repository = ActivityRepository(conn)
+    excel_service = ExcelService()
+
+    return SyncService(
+        client=client,
+        activity_service=ActivityService(),
+        activity_repository=activity_repository,
+        corredor_state_repository=CorredorStateRepository(conn),
+        excel_service=excel_service,
+        escrita_excel_repository=EscritaExcelRepository(conn),
+        adocao_service=AdocaoService(excel_service, activity_repository),
+    )
+
+
+def sincronizar_todos(
+    config: Config, sync_service: SyncService, corredor_state: CorredorStateRepository
+) -> int:
     """Percorre o cadastro e devolve quantos corredores falharam.
 
     Cada corredor é isolado: com dezenas de participantes, um token expirado ou
-    uma planilha aberta no Excel não pode interromper a coleta dos demais.
+    uma planilha aberta no Excel não pode interromper a coleta dos demais. A
+    exceção é a cota diária: `QuotaExhaustedError` não é falha de ninguém —
+    os corredores restantes ficam **pendentes**, e a execução para.
     """
     falhas = 0
-    for corredor in config.corredores:
+    for indice, corredor in enumerate(config.corredores):
+        if _precisa_reinscricao(corredor, corredor_state):
+            continue
+
         try:
-            sincronizar_corredor(config, corredor)
+            sync_service.sincronizar(corredor)
+        except QuotaExhaustedError as erro:
+            pendentes = [c.id for c in config.corredores[indice:]]
+            logger.error(
+                "%s — %d corredor(es) ficam pendentes para a próxima execução: %s",
+                erro,
+                len(pendentes),
+                ", ".join(pendentes),
+            )
+            break
+        except RevokedTokenError as erro:
+            # Já marcado para reinscrição por `auth.obter_access_token`/`chamar_renovando`.
+            logger.error("Corredor %s precisa reinscrever-se: %s", corredor, erro)
+            falhas += 1
+        except (AuthorizationError, StravaError) as erro:
+            logger.error("Corredor %s: %s", corredor, erro)
+            falhas += 1
         except Exception:
-            # Sem `raise`: a falha de um participante é registrada e a coleta segue.
+            # Banco indisponível, planilha aberta no Excel, bug inesperado —
+            # qualquer falha fora do vocabulário do Strava ainda isola o
+            # corredor em vez de derrubar a execução inteira.
             logger.exception("Falha ao sincronizar o corredor %s", corredor)
             falhas += 1
     return falhas
 
 
-def sincronizar_corredor(config: Config, corredor: Corredor) -> None:
-    """Sincroniza um único corredor. (Stub — Fase 6.)"""
-    # TODO(Fase 6): construir e executar o SyncService para este corredor.
+def _precisa_reinscricao(corredor: Corredor, corredor_state: CorredorStateRepository) -> bool:
+    """True (e loga) se o corredor está marcado para reinscrição.
+
+    Checagem **antes** de tentar sincronizar: pular aqui não gasta nenhuma
+    requisição, o que importa com a cota dividida por 50+ participantes. Não
+    conta como falha desta execução — é um estado já conhecido, não uma
+    descoberta nova.
+    """
+    estado = corredor_state.buscar(corredor.id)
+    if estado is None or not estado.precisa_reinscricao:
+        return False
+
     logger.warning(
-        "Corredor %s ainda não sincronizado: Fases 3-6 pendentes "
-        "(planilha=%s, dia 1=%s, corte=%s).",
+        "Corredor %s pulado: precisa reinscrição (%s). Gere um link novo: "
+        "python -m src.inscricao link %s",
         corredor,
-        corredor.excel_path.name,
-        corredor.start_date.isoformat(),
-        corredor.cutover_date.isoformat(),
+        estado.motivo_reinscricao or "motivo não registrado",
+        corredor.id,
     )
+    return True
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Regras de negócio das atividades: filtrar corridas, validar e agregar por dia.
 
-A agregação por dia é da Fase 6; a Fase 3 entrega o filtro e a conversão do JSON
-do Strava para o modelo interno.
+A Fase 3 entrega o filtro e a conversão do JSON do Strava para o modelo
+interno; a Fase 6 acrescenta a agregação diária.
 
 ⚠️ **O horário que decide a linha da planilha é o `start_date_local`.** A grade é
 indexada pelo dia local do corredor: uma corrida às 22h de 01/01 pertence à linha
@@ -17,9 +17,11 @@ modelo justamente porque respondem a coisas diferentes — ver `_data_local` e
 from __future__ import annotations
 
 from collections import Counter
-from datetime import UTC, datetime
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
 
 from src.models.activity import Activity
+from src.models.daily_load import DailyLoad
 from src.utils.errors import InvalidResponseError
 from src.utils.logger import get_logger
 
@@ -93,9 +95,21 @@ class ActivityService:
         """Converte uma lista de atividades, na ordem recebida."""
         return [self.to_activity(payload) for payload in payloads]
 
-    def aggregate_daily(self, activities: list) -> list:
-        """Agrega as corridas por dia (DailyLoad). (Stub — Fase 6.)"""
-        raise NotImplementedError  # TODO(Fase 6)
+    def aggregate_daily(self, day: date, activities: Iterable[Activity]) -> DailyLoad:
+        """Agrega as corridas de **um dia** num `DailyLoad`.
+
+        As atividades devem vir do banco (`ActivityRepository.por_dia`), não
+        do retorno cru da API: se a segunda corrida do dia chegar numa
+        execução posterior, agregar só a resposta da API escreveria a carga
+        de uma corrida só, perdendo a primeira — ver `ActivityRepository.por_dia`.
+
+        Soma simples de distância e tempo; o pace do dia (`DailyLoad.pace_min_km`)
+        é derivado dos totais, não a média dos paces por corrida.
+        """
+        lote = tuple(activities)
+        carga_km = sum(a.distance_km for a in lote)
+        tempo_total_s = sum(a.moving_time_s for a in lote)
+        return DailyLoad(day=day, carga_km=carga_km, tempo_total_s=tempo_total_s)
 
 
 def _data_local(payload: dict, rotulo: str) -> datetime:
