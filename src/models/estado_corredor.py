@@ -40,6 +40,10 @@ class EstadoCorredor:
     motivo_reinscricao: str | None = None
     atualizado_em: datetime | None = None
 
+    # Quantas execuções seguidas falharam (Fase 7) — zera a cada sincronização
+    # bem-sucedida. Base do alerta de "token provavelmente morto".
+    falhas_consecutivas: int = 0
+
     @property
     def inscrito(self) -> bool:
         """True quando há token utilizável e nenhuma reinscrição pendente."""

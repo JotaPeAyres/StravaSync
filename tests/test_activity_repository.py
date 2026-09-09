@@ -6,13 +6,13 @@ ser deslocada, e um lote nunca pode ser gravado pela metade.
 """
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from src.models.activity import Activity
 from src.models.registro_historico import RegistroHistorico
-from src.models.strava_token import StravaToken
 from src.repositories.activity_repository import (
     ORIGEM_MANUAL,
     ORIGEM_STRAVA,
@@ -94,28 +94,35 @@ def test_init_schema_cria_a_tabela_de_atividades(tmp_path):
         servico.close()
 
 
-def test_migracao_de_v1_preserva_o_estado(monkeypatch, tmp_path):
+def test_migracao_de_v1_preserva_o_estado(tmp_path):
     """Recriar `corredor_state` obrigaria 50+ participantes a reautorizar.
 
     Cada um deles teria de receber um link novo, por mensagem, um por um.
+
+    O banco "antigo" é semeado com SQL cru direto no schema v1 (sem passar
+    pelo repositório, que já assume as colunas das versões seguintes) — é o
+    jeito de simular de verdade um banco de alguém que nunca rodou a versão
+    nova do app, em vez de só fingir a versão gravada.
     """
     caminho = tmp_path / "estado.db"
 
-    monkeypatch.setattr(database_service, "SCHEMA_VERSION", 1)
-    antigo = DatabaseService(caminho)
-    antigo.init_schema()
-    CorredorStateRepository(antigo.connect()).salvar_token(
-        "p001",
-        StravaToken(
-            access_token="access-1",
-            refresh_token="refresh-1",
-            expira_em=AGORA + timedelta(hours=6),
-            athlete_id=777,
-            scope="read,activity:read_all",
+    conn_v1 = sqlite3.connect(caminho)
+    conn_v1.executescript(database_service._SCHEMA_V1)
+    conn_v1.execute(
+        """
+        INSERT INTO corredor_state (
+            corredor_id, athlete_id, scope, refresh_token, access_token,
+            access_token_expira_em, atualizado_em
+        ) VALUES ('p001', 777, 'read,activity:read_all', 'refresh-1', 'access-1', ?, ?)
+        """,
+        (
+            database_service.para_texto(AGORA + timedelta(hours=6)),
+            database_service.para_texto(AGORA),
         ),
     )
-    antigo.close()
-    monkeypatch.undo()
+    conn_v1.execute("PRAGMA user_version = 1")
+    conn_v1.commit()
+    conn_v1.close()
 
     novo = DatabaseService(caminho)
     try:
@@ -125,6 +132,7 @@ def test_migracao_de_v1_preserva_o_estado(monkeypatch, tmp_path):
         assert novo.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert estado.refresh_token == "refresh-1"
         assert estado.athlete_id == 777
+        assert estado.falhas_consecutivas == 0
         novo.connect().execute("SELECT corredor_id FROM activities")
     finally:
         novo.close()

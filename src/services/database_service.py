@@ -35,7 +35,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS corredor_state (
@@ -117,6 +117,15 @@ CREATE TABLE IF NOT EXISTS excel_escritas (
 );
 """
 
+# `falhas_consecutivas` sustenta o alerta da Fase 7 (scheduler): quantas
+# execuções seguidas um corredor falhou, para avisar antes que o operador
+# precise notar sozinho que um token está morto há semanas. Zera a cada
+# sincronização bem-sucedida (`CorredorStateRepository.registrar_sincronizacao`)
+# e incrementa a cada falha (`CorredorStateRepository.registrar_falha`).
+_SCHEMA_V4 = """
+ALTER TABLE corredor_state ADD COLUMN falhas_consecutivas INTEGER NOT NULL DEFAULT 0;
+"""
+
 
 class DatabaseService:
     """Gerencia a conexão e o schema do banco local."""
@@ -158,6 +167,8 @@ class DatabaseService:
                 conn.executescript(_SCHEMA_V2)
             if versao < 3:
                 conn.executescript(_SCHEMA_V3)
+            if versao < 4:
+                conn.executescript(_SCHEMA_V4)
 
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()

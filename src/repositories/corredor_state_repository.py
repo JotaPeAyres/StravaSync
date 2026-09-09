@@ -23,7 +23,7 @@ from src.utils.errors import StateError
 _COLUNAS = """
     corredor_id, athlete_id, scope, refresh_token, access_token,
     access_token_expira_em, ultima_sincronizacao, ultimo_evento_em,
-    precisa_reinscricao, motivo_reinscricao, atualizado_em
+    precisa_reinscricao, motivo_reinscricao, atualizado_em, falhas_consecutivas
 """
 
 
@@ -71,7 +71,7 @@ class CorredorStateRepository:
             f"""
             INSERT INTO corredor_state ({_COLUNAS}) VALUES (
                 :corredor_id, :athlete_id, :scope, :refresh_token, :access_token,
-                :access_token_expira_em, NULL, NULL, 0, NULL, :atualizado_em
+                :access_token_expira_em, NULL, NULL, 0, NULL, :atualizado_em, 0
             )
             ON CONFLICT(corredor_id) DO UPDATE SET
                 athlete_id             = COALESCE(excluded.athlete_id, corredor_state.athlete_id),
@@ -102,6 +102,10 @@ class CorredorStateRepository:
 
         `ultimo_evento_em` só avança, nunca retrocede: ele é a base do `after=`
         e voltar no tempo faria a próxima execução repaginar histórico já visto.
+
+        Também zera `falhas_consecutivas`: só é chamado quando a sincronização
+        deste corredor terminou com sucesso, então qualquer sequência de falhas
+        anterior acabou de ser interrompida.
         """
         estado = self.buscar(corredor_id)
         anterior = estado.ultimo_evento_em if estado is not None else None
@@ -115,6 +119,7 @@ class CorredorStateRepository:
             ON CONFLICT(corredor_id) DO UPDATE SET
                 ultima_sincronizacao = excluded.ultima_sincronizacao,
                 ultimo_evento_em     = excluded.ultimo_evento_em,
+                falhas_consecutivas  = 0,
                 atualizado_em        = excluded.atualizado_em
             """,
             {
@@ -152,6 +157,29 @@ class CorredorStateRepository:
         )
         self._conn.commit()
 
+    def registrar_falha(self, corredor_id: str) -> int:
+        """Incrementa o contador de falhas seguidas deste corredor e devolve o novo valor.
+
+        Chamado pelo `main.py` quando a sincronização de um corredor falha (fora
+        de `QuotaExhaustedError`, que não é falha dele). É a base do alerta da
+        Fase 7 — sem isso, "falhou várias execuções seguidas" não tem como ser
+        detectado, porque `falhas` em `main.py` só existe durante a execução
+        atual.
+        """
+        linha = self._executar(
+            """
+            INSERT INTO corredor_state (corredor_id, falhas_consecutivas, atualizado_em)
+            VALUES (:corredor_id, 1, :atualizado_em)
+            ON CONFLICT(corredor_id) DO UPDATE SET
+                falhas_consecutivas = corredor_state.falhas_consecutivas + 1,
+                atualizado_em       = excluded.atualizado_em
+            RETURNING falhas_consecutivas
+            """,
+            {"corredor_id": corredor_id, "atualizado_em": para_texto(self._agora())},
+        ).fetchone()[0]
+        self._conn.commit()
+        return linha
+
     def limpar_reinscricao(self, corredor_id: str) -> None:
         """Desfaz a marcação (o participante autorizou de novo)."""
         self._executar(
@@ -186,4 +214,5 @@ def _para_modelo(linha: sqlite3.Row) -> EstadoCorredor:
         precisa_reinscricao=bool(linha["precisa_reinscricao"]),
         motivo_reinscricao=linha["motivo_reinscricao"],
         atualizado_em=de_texto(linha["atualizado_em"]),
+        falhas_consecutivas=linha["falhas_consecutivas"],
     )

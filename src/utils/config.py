@@ -54,6 +54,11 @@ TIMEOUT_MINIMO_S = 1.0
 # sobraria cota nenhuma para a execução.
 RESERVA_MAXIMA = 90
 
+# Quantas execuções seguidas de falha até o scheduler (Fase 7) soltar um alerta
+# CRITICAL — abaixo disso, um erro isolado (rede instável, planilha aberta por
+# um instante) não deveria acordar ninguém.
+DEFAULT_ALERTA_FALHAS_CONSECUTIVAS = 3
+
 _NIVEIS_DE_LOG = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
 
 _CAMPOS_CONHECIDOS = {
@@ -96,6 +101,9 @@ class Config:
     strava_pausa_entre_chamadas_s: float = DEFAULT_PAUSA_S
     strava_reserva_de_vazao: int = DEFAULT_RESERVA
 
+    # Scheduler (Fase 7): também no fim, mesma razão dos campos de vazão.
+    alerta_falhas_consecutivas: int = DEFAULT_ALERTA_FALHAS_CONSECUTIVAS
+
     def safe_summary(self) -> str:
         """Resumo de uma linha para o log de inicialização, com segredos mascarados."""
         return (
@@ -107,7 +115,8 @@ class Config:
             f"log_file={self.log_file or '(desativado)'} "
             f"timeout={self.strava_timeout_s}s "
             f"pausa={self.strava_pausa_entre_chamadas_s}s "
-            f"reserva={self.strava_reserva_de_vazao}"
+            f"reserva={self.strava_reserva_de_vazao} "
+            f"alerta_falhas={self.alerta_falhas_consecutivas}"
         )
 
 
@@ -145,6 +154,13 @@ def load_config(env_file: Path | None = None, corredores_file: Path | None = Non
         maximo=RESERVA_MAXIMA,
         inteiro=True,
     )
+    alerta_falhas = _numero(
+        "ALERTA_FALHAS_CONSECUTIVAS",
+        DEFAULT_ALERTA_FALHAS_CONSECUTIVAS,
+        erros,
+        minimo=1.0,
+        inteiro=True,
+    )
 
     cadastro = corredores_file or _caminho(
         os.getenv("CORREDORES_PATH") or DEFAULT_CORREDORES_PATH
@@ -169,6 +185,7 @@ def load_config(env_file: Path | None = None, corredores_file: Path | None = Non
         strava_timeout_s=timeout_s,
         strava_pausa_entre_chamadas_s=pausa_s,
         strava_reserva_de_vazao=int(reserva),
+        alerta_falhas_consecutivas=int(alerta_falhas),
     )
 
 

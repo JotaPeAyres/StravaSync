@@ -8,15 +8,23 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
 
 ## Estado atual
 
-- **Fase 1 (Estrutura): concluída e na `main`** (branch `fase-1-estrutura` mergeada; pode ser apagada).
-- **Fase 2 (Configuração): concluída e na `main`** — config em duas camadas (`.env` global + `corredores.toml`), logging central, modelos (`Activity`, `DailyLoad`, `Corredor`), 54 testes. Branch `fase-2-configuracao` mergeada; pode ser apagada.
-- **Fase 3 (Strava): implementada na branch `fase-3-strava`**, ainda **não mergeada**. Entrega: hierarquia de exceções, tabela de estado por corredor no SQLite, `RateLimiter`, `StravaClient`, política OAuth (`utils/auth.py`), filtro/conversão de atividades e a CLI `src/inscricao.py`. 197 testes, tudo com `httpx.MockTransport` — **nenhuma credencial real foi usada**.
-- **Fase 4 (Banco): implementada e na `main`.** Entrega: schema v2 com `activities`, `ActivityRepository` com upsert, consultas por período e a marca d'água do `after=`. 238 testes.
-- **Fase 5 (Excel): implementada na branch `fase-5-excel`**, ainda **não mergeada**. Entrega: `ExcelService.sincronizar(corredor, daily_loads)`, escrevendo só `Daily_Data` (B/C) e `PACE` (B/C/D/E), validando `B2` como fonte da verdade, respeitando os tetos de cada aba e salvando de forma atômica (`.tmp.xlsx` + `os.replace`). Testado contra o **template real** (`Cópia de Planilha_carga_corrida.xlsx`), inclusive round-trip de fórmulas e named ranges.
-- **Fase 5.5 (Adoção de planilhas já preenchidas): implementada, na branch `fase-6-regras`** (o histórico de branches ficou `fase-5-excel` → `fase-5.5-adocao` → `fase-6-regras`, nenhuma mergeada ainda). Entrega: `ExcelService.ler_historico_manual` (lê o período `[start_date, cutover_date)` de volta), `ActivityRepository.importar_historico` (grava esse período no SQLite como origem `manual`, sem `activity_id`), `EscritaExcelRepository` + `ExcelService.sincronizar(..., ultima_escrita=...)` (detecta e preserva edição humana pós-corte) e `AdocaoService.adotar(corredor)` (a costura das duas pontas, com relatório). Schema do banco em v3.
-- **Fase 6 (Regra de Negócio): implementada na branch `fase-6-regras`**, ainda **não mergeada**. Entrega: `ActivityService.aggregate_daily`, `SyncService.sincronizar(corredor)` (a costura Strava → SQLite → Excel de **um** corredor) e o `main.py` reescrito — cria `StravaClient`/`RateLimiter`/`DatabaseService` uma única vez, percorre o cadastro isolando falha por corredor, exatamente como o pseudocódigo já especificado abaixo. Detecção de atividade apagada no Strava, preenchimento contíguo dos dias sem corrida e reescrita dos `dias_afetados` (corrida que muda de data) também entraram aqui. 309 testes.
-- **Pendência bloqueante para validar de verdade** (Fases 3 a 6 dependem do Strava real): registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o desenvolvimento — tudo até aqui foi validado com `httpx.MockTransport` e o template real do Excel.
-- **Próxima: Fase 7 (Scheduler)** — execução diária automática, dimensionamento da janela para 50+ corredores, alerta quando um corredor falha várias execuções seguidas.
+- **Fases 1 a 6: concluídas e na `main`.** Estrutura, configuração em duas camadas (`.env` +
+  `corredores.toml`), OAuth/API do Strava, banco (`activities`, schema v3), `ExcelService`
+  (com adoção de planilhas preenchidas à mão) e `SyncService`/`main.py` amarrando tudo —
+  ver as seções por fase abaixo para os detalhes de cada uma. 309 testes, tudo com
+  `httpx.MockTransport` e o template real do Excel — **nenhuma credencial real foi usada**.
+- **Fase 7 (Scheduler): implementada na branch `fase-7-scheduler`**, ainda **não mergeada**.
+  Entrega: `src/scheduler.py` (wrapper para agendador externo, delega para `main.main()`),
+  schema v4 (`corredor_state.falhas_consecutivas`), ordenação de `sincronizar_todos` por
+  corredor sincronizado há mais tempo (rotação quando a cota corta a execução no meio) e
+  alerta `CRITICAL` a cada múltiplo de `ALERTA_FALHAS_CONSECUTIVAS` falhas seguidas de um
+  mesmo corredor. 324 testes. Ver "Fase 7 (Scheduler) — como ficou" abaixo.
+- **Pendência bloqueante para validar de verdade** (Fases 3 a 7 dependem do Strava real):
+  registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher
+  `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o
+  desenvolvimento — tudo até aqui foi validado com `httpx.MockTransport` e o template real
+  do Excel.
+- **Próxima: Fase 8 (Testes)** — ver `TASKS.md`.
 
 ## Convenções de trabalho (IMPORTANTE)
 
@@ -513,6 +521,68 @@ o que mudou foi só o pseudocódigo de `main.py` deixar de ser pseudocódigo.
   o limite superior da janela de escrita. Um corredor num fuso muito adiantado poderia ver "o
   dia de hoje" só aparecer no dia seguinte, na pior das hipóteses — auto-corrige na execução
   seguinte, então não foi tratado como bug.
-- **Fase 7 (Scheduler)** decide a cadência real das execuções, o dimensionamento da janela para
-  50+ corredores, e como alertar quando um corredor falha várias vezes seguidas (`falhas` hoje
-  só é um contador por execução, sem memória entre execuções).
+- ~~Fase 7 (Scheduler) decide a cadência real das execuções...~~ — feito, ver a seção
+  "Fase 7 (Scheduler) — como ficou" abaixo.
+
+## Fase 7 (Scheduler) — como ficou
+
+### `src/scheduler.py` — o wrapper
+
+O gatilho continua **externo** (Windows Task Scheduler, cron, Docker+cron, GitHub Actions) —
+não existe loop nem `sleep` internos, de propósito. `executar()` chama `main.main()` e é só a
+rede de segurança para o que sobra do vocabulário de exceções já tratado ali: um bug de
+configuração ou de infraestrutura antes do logging subir não pode virar um traceback cru na
+tela do agendador. Devolve o código de saída de `main()` sem alteração no caminho normal.
+
+Exemplo de agendamento no Windows (uma execução por dia, às 6h):
+
+```powershell
+schtasks /create /tn "StravaSync" /tr "uv run python -m src.scheduler" /sc daily /st 06:00 /sd 06:00
+```
+
+Em Linux, o equivalente é uma linha de `crontab -e`: `0 6 * * * cd /caminho/do/projeto && uv run python -m src.scheduler`.
+
+### Schema v4 — falhas consecutivas
+
+`corredor_state` ganha `falhas_consecutivas INTEGER NOT NULL DEFAULT 0` (migração aditiva, como
+as três anteriores). `CorredorStateRepository.registrar_falha(corredor_id)` incrementa e devolve
+o novo valor (via `RETURNING`, suportado pelo SQLite embutido no Python 3.12);
+`registrar_sincronizacao` zera o contador — só é chamado quando a sincronização daquele
+corredor terminou com sucesso. `salvar_token` (troca/renovação de OAuth) **não mexe** no
+contador: renovar um token não é o mesmo que ter sincronizado com sucesso.
+
+⚠️ **Armadilha descoberta ao migrar o teste de v1**: `test_migracao_de_v1_preserva_o_estado`
+simulava "um banco só na v1" fazendo `monkeypatch.setattr(database_service, "SCHEMA_VERSION",
+1)` e chamando `init_schema()` — mas os blocos `if versao < N:` comparam contra números
+literais, não contra a constante `SCHEMA_VERSION`, então isso sempre aplicou **todas** as
+migrações de qualquer forma (só a `PRAGMA user_version` final ficava errada). Isso nunca deu
+erro porque `_SCHEMA_V2`/`_SCHEMA_V3` são idempotentes (`CREATE ... IF NOT EXISTS`) — mas
+`_SCHEMA_V4` usa `ALTER TABLE ADD COLUMN`, que **não é**, e rodar duas vezes quebra com
+"duplicate column name". O teste foi corrigido para semear o banco v1 com SQL cru (só as
+colunas que existiam na v1 de verdade), em vez de confiar no monkeypatch.
+
+### `main.py` — ordenação e alerta
+
+`sincronizar_todos` ordena `config.corredores` por `ultima_sincronizacao` crescente antes do
+laço (`_ordenar_por_prioridade`) — "nunca sincronizado" conta como o valor mais urgente de
+todos. `sorted` é estável, então um banco novo (todos empatados em "nunca") preserva a ordem do
+`corredores.toml`. Sem isso, uma `QuotaExhaustedError` sempre deixaria pendente o mesmo grupo no
+fim do cadastro.
+
+Toda falha que já contava para `falhas` (isolada por corredor: `RevokedTokenError`,
+`AuthorizationError`/`StravaError`, `Exception` genérica) agora também chama
+`_registrar_falha_e_alertar`, que grava no banco e solta `logger.critical` quando o total for
+**múltiplo** de `config.alerta_falhas_consecutivas` (padrão 3, `ALERTA_FALHAS_CONSECUTIVAS` no
+`.env`) — múltiplo, não só "maior ou igual", para não logar `CRITICAL` a cada execução para
+sempre depois que o problema já foi visto, mas ainda lembrar periodicamente.
+`QuotaExhaustedError` continua **não contando** como falha de ninguém — nem soma ao contador
+persistido, só ao contador local da execução.
+
+### Fora de escopo (de propósito)
+
+- Nenhum daemon Python interno nem lib de agendamento nova — o stub já documentava o gatilho
+  externo, e isso não mudou.
+- Nenhum canal de notificação real (e-mail/Telegram/Discord) — está em "Melhorias Futuras"; o
+  alerta desta fase é só um log `CRITICAL`.
+- Nenhum limite configurável de "corredores por execução" — a ordenação por recência já resolve
+  a injustiça do `TASKS.md` sem precisar de um cursor persistido novo.

@@ -222,6 +222,42 @@ def test_data_corrompida_no_banco_nao_derruba_a_leitura(banco, repo):
     assert repo.buscar("p001").ultima_sincronizacao is None
 
 
+def test_registrar_falha_comeca_em_um_e_incrementa(repo):
+    assert repo.registrar_falha("p001") == 1
+    assert repo.registrar_falha("p001") == 2
+    assert repo.registrar_falha("p001") == 3
+
+    assert repo.buscar("p001").falhas_consecutivas == 3
+
+
+def test_registrar_falha_nao_mexe_em_outro_corredor(repo):
+    repo.registrar_falha("p001")
+    repo.registrar_falha("p001")
+
+    assert repo.buscar("p002") is None
+    assert repo.registrar_falha("p002") == 1
+
+
+def test_sincronizacao_bem_sucedida_zera_as_falhas(repo):
+    """O alerta é sobre falhas *seguidas* — um sucesso interrompe a sequência."""
+    repo.registrar_falha("p001")
+    repo.registrar_falha("p001")
+
+    repo.registrar_sincronizacao("p001")
+
+    assert repo.buscar("p001").falhas_consecutivas == 0
+
+
+def test_salvar_token_nao_mexe_nas_falhas(repo):
+    """Trocar/renovar o token não é o mesmo que sincronizar com sucesso."""
+    repo.registrar_falha("p001")
+    repo.registrar_falha("p001")
+
+    repo.salvar_token("p001", _token())
+
+    assert repo.buscar("p001").falhas_consecutivas == 2
+
+
 def test_falha_do_sqlite_vira_state_error(tmp_path):
     servico = DatabaseService(tmp_path / "estado.db")
     try:

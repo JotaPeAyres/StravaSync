@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import UTC, datetime
 
 from src.api.rate_limiter import RateLimiter
 from src.api.strava_client import StravaClient
@@ -98,15 +99,17 @@ def sincronizar_todos(
     exceção é a cota diária: `QuotaExhaustedError` não é falha de ninguém —
     os corredores restantes ficam **pendentes**, e a execução para.
     """
+    ordenados = _ordenar_por_prioridade(config.corredores, corredor_state)
+
     falhas = 0
-    for indice, corredor in enumerate(config.corredores):
+    for indice, corredor in enumerate(ordenados):
         if _precisa_reinscricao(corredor, corredor_state):
             continue
 
         try:
             sync_service.sincronizar(corredor)
         except QuotaExhaustedError as erro:
-            pendentes = [c.id for c in config.corredores[indice:]]
+            pendentes = [c.id for c in ordenados[indice:]]
             logger.error(
                 "%s — %d corredor(es) ficam pendentes para a próxima execução: %s",
                 erro,
@@ -118,16 +121,60 @@ def sincronizar_todos(
             # Já marcado para reinscrição por `auth.obter_access_token`/`chamar_renovando`.
             logger.error("Corredor %s precisa reinscrever-se: %s", corredor, erro)
             falhas += 1
+            _registrar_falha_e_alertar(corredor, corredor_state, config)
         except (AuthorizationError, StravaError) as erro:
             logger.error("Corredor %s: %s", corredor, erro)
             falhas += 1
+            _registrar_falha_e_alertar(corredor, corredor_state, config)
         except Exception:
             # Banco indisponível, planilha aberta no Excel, bug inesperado —
             # qualquer falha fora do vocabulário do Strava ainda isola o
             # corredor em vez de derrubar a execução inteira.
             logger.exception("Falha ao sincronizar o corredor %s", corredor)
             falhas += 1
+            _registrar_falha_e_alertar(corredor, corredor_state, config)
     return falhas
+
+
+def _ordenar_por_prioridade(
+    corredores: tuple[Corredor, ...], corredor_state: CorredorStateRepository
+) -> list[Corredor]:
+    """Corredores sincronizados há mais tempo (ou nunca) vêm primeiro.
+
+    Sem isso, uma `QuotaExhaustedError` sempre deixaria pendente o mesmo grupo
+    no fim da lista do `corredores.toml` — com 50+ participantes, a rotina
+    nunca chegaria a eles. `sorted` é estável: corredores empatados (o comum
+    para um banco novo, todos `None`) mantêm a ordem do cadastro.
+    """
+    nunca = datetime.min.replace(tzinfo=UTC)
+
+    def chave(corredor: Corredor) -> datetime:
+        estado = corredor_state.buscar(corredor.id)
+        if estado is None or estado.ultima_sincronizacao is None:
+            return nunca
+        return estado.ultima_sincronizacao
+
+    return sorted(corredores, key=chave)
+
+
+def _registrar_falha_e_alertar(
+    corredor: Corredor, corredor_state: CorredorStateRepository, config: Config
+) -> None:
+    """Grava a falha no estado persistido e solta um alerta a cada N seguidas.
+
+    Alertar a cada múltiplo do limiar (e não a cada falha a partir dele) evita
+    um `CRITICAL` novo em toda execução depois que o problema já foi visto,
+    mas ainda lembra periodicamente enquanto ele não for corrigido.
+    """
+    novas_falhas = corredor_state.registrar_falha(corredor.id)
+    if novas_falhas % config.alerta_falhas_consecutivas == 0:
+        logger.critical(
+            "Corredor %s falhou %d execuções seguidas — considere reinscrever: "
+            "python -m src.inscricao link %s",
+            corredor,
+            novas_falhas,
+            corredor.id,
+        )
 
 
 def _precisa_reinscricao(corredor: Corredor, corredor_state: CorredorStateRepository) -> bool:
