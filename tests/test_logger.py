@@ -82,3 +82,15 @@ def test_silencia_bibliotecas_barulhentas(logging_isolado):
 
 def test_get_logger_devolve_logger_nomeado():
     assert get_logger("src.services.sync_service").name == "src.services.sync_service"
+
+
+def test_arquivo_de_log_inacessivel_cai_para_console(logging_isolado, tmp_path):
+    """Pasta impossível de criar (aqui, um arquivo no lugar do diretório) não
+    pode derrubar a inicialização do logging — cai para console apenas."""
+    bloqueio = tmp_path / "arquivo.txt"
+    bloqueio.write_text("não é um diretório")
+    caminho_invalido = bloqueio / "sub" / "app.log"
+
+    setup_logging(log_file=caminho_invalido)  # não deve levantar
+
+    assert len(logging_isolado.handlers) == 1  # só o console; o de arquivo falhou

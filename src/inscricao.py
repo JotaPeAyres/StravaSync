@@ -23,8 +23,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from src.api.rate_limiter import RateLimiter
-from src.api.strava_client import StravaClient
+from src.api.strava_client import StravaClient, montar_cliente
 from src.models.corredor import Corredor
 from src.repositories.corredor_state_repository import CorredorStateRepository
 from src.services.database_service import DatabaseService
@@ -173,15 +172,12 @@ def _cliente(config: Config) -> StravaClient:
 
     A inscrição divide a cota com a coleta — é a mesma aplicação no Strava.
     """
-    limitador = RateLimiter(
-        pausa_s=config.strava_pausa_entre_chamadas_s,
-        reserva=config.strava_reserva_de_vazao,
-    )
-    return StravaClient(
+    return montar_cliente(
         config.strava_client_id,
         config.strava_client_secret,
-        limiter=limitador,
         timeout_s=config.strava_timeout_s,
+        pausa_s=config.strava_pausa_entre_chamadas_s,
+        reserva=config.strava_reserva_de_vazao,
     )
 
 

@@ -214,6 +214,25 @@ def test_espera_do_429_ja_satisfaz_a_pausa():
     assert relogio.dormidas == [30]
 
 
+def test_429_nao_dobra_a_espera_seguinte_por_uso_desatualizado():
+    """Depois de esperar um 429 até a virada da janela, `_uso_curto` não pode
+    continuar no teto — senão a chamada seguinte dormiria quase uma janela
+    inteira de novo, dobrando a recuperação (achado do code review da
+    Fase 8)."""
+    relogio = _Relogio()
+    agora = datetime(2026, 8, 18, 12, 10, tzinfo=UTC)  # 10 min dentro da janela
+    limitador = _limitador(relogio, agora=lambda: agora)
+
+    limitador.registrar_resposta(_cabecalhos(LIMITE_CURTO_PADRAO, 500))  # uso no teto
+    limitador.esperar_apos_429(1, {})  # sem Retry-After: espera a virada da janela
+
+    limitador.antes_da_chamada()
+
+    # Só a espera do 429 — se `_uso_curto` não tivesse zerado, haveria uma
+    # segunda espera aqui, praticamente do mesmo tamanho da primeira.
+    assert relogio.dormidas == [pytest.approx(JANELA_CURTA_S - 10 * 60)]
+
+
 def test_resumo_funciona_antes_de_qualquer_resposta():
     relogio = _Relogio()
 

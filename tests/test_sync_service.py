@@ -188,6 +188,74 @@ def test_preenche_dias_de_descanso_ate_hoje(banco, planilha):
     assert aba.cell(row=5, column=3).value is None  # dia 4: ainda não chegou
 
 
+def test_atividade_anterior_ao_start_date_e_descartada_sem_gravar(banco, planilha, caplog):
+    """Segunda linha de defesa, independente do `ExcelService`: a folga do
+    `after=` pode alcançar alguns dias antes de `start_date` (achado do code
+    review da Fase 8) — o `SyncService` não pode confiar só na checagem do
+    lado do Excel."""
+    corredor = _corredor(planilha)  # start_date = INICIO = 2026-01-01
+    _com_token_valido(banco)
+    servidor = _Servidor(
+        _resposta(json=[_corrida(1, "2025-12-20", km=5.0), _corrida(2, "2026-01-01", km=10.0)])
+    )
+
+    with caplog.at_level("WARNING"):
+        resultado = _servico(banco, servidor, hoje=INICIO).sincronizar(corredor)
+
+    assert resultado.atividades_novas == 1  # só a de 01/01
+    assert ActivityRepository(banco.connect()).por_dia("p001", date(2025, 12, 20)) == ()
+    assert "fora do escopo" in caplog.text
+
+
+def test_agrega_multiplos_dias_com_uma_unica_consulta_ao_banco(banco, planilha):
+    """A janela self-healing pode cobrir vários dias (execução perdida do
+    scheduler) — antes disso virava uma consulta por dia (`por_dia`); agora
+    é uma só, via `por_periodo` (achado do code review da Fase 8)."""
+    corredor = _corredor(planilha)
+    _com_token_valido(banco)
+    servidor = _Servidor(
+        _resposta(json=[_corrida(1, "2026-01-01", km=10.0), _corrida(2, "2026-01-04", km=6.0)])
+    )
+
+    class _RepoContado(ActivityRepository):
+        def __init__(self, conn):
+            super().__init__(conn)
+            self.chamadas_por_dia = 0
+            self.chamadas_por_periodo = 0
+
+        def por_dia(self, *args, **kwargs):
+            self.chamadas_por_dia += 1
+            return super().por_dia(*args, **kwargs)
+
+        def por_periodo(self, *args, **kwargs):
+            self.chamadas_por_periodo += 1
+            return super().por_periodo(*args, **kwargs)
+
+    conn = banco.connect()
+    repo_contado = _RepoContado(conn)
+    excel_service = ExcelService()
+    servico = SyncService(
+        client=_cliente(servidor),
+        activity_service=ActivityService(),
+        activity_repository=repo_contado,
+        corredor_state_repository=CorredorStateRepository(conn),
+        excel_service=excel_service,
+        escrita_excel_repository=EscritaExcelRepository(conn),
+        adocao_service=AdocaoService(excel_service, repo_contado),
+        hoje=lambda: date(2026, 1, 4),
+    )
+
+    servico.sincronizar(corredor)
+
+    assert repo_contado.chamadas_por_dia == 0
+    assert repo_contado.chamadas_por_periodo == 1
+    aba = _daily_data(planilha)
+    assert aba["C2"].value == 10.0  # 01/01
+    assert aba["C3"].value == 0.0  # 01/02 descanso
+    assert aba["C4"].value == 0.0  # 01/03 descanso
+    assert aba["C5"].value == 6.0  # 01/04
+
+
 def test_filtra_tipos_que_nao_sao_corrida(banco, planilha):
     corredor = _corredor(planilha)
     _com_token_valido(banco)
@@ -255,7 +323,13 @@ def test_dia_antigo_e_reescrito_quando_atividade_muda_de_data(banco, planilha):
 # ------------------------------------------------------------------- after=
 
 
-def test_after_usa_meia_noite_utc_do_cutover_na_primeira_vez(banco, planilha):
+def test_after_usa_meia_noite_utc_do_cutover_menos_a_folga_na_primeira_vez(banco, planilha):
+    """A folga cobre o fuso do corredor: `cutover_date` é um dia-calendário
+    LOCAL, e a meia-noite UTC dele não coincide com a meia-noite local em
+    fusos != 0 — sem a folga também no piso (e não só depois da primeira
+    sincronização), uma corrida perto da virada do dia podia nunca ser
+    buscada, porque `after=` nunca retrocede (achado do code review da
+    Fase 8)."""
     corredor = _corredor(planilha, cutover_date=date(2026, 1, 5))
     _com_token_valido(banco)
     servidor = _Servidor(_resposta(json=[]))
@@ -263,7 +337,7 @@ def test_after_usa_meia_noite_utc_do_cutover_na_primeira_vez(banco, planilha):
     _servico(banco, servidor, hoje=date(2026, 1, 5)).sincronizar(corredor)
 
     pedido = servidor.requisicoes[0]
-    esperado = int(datetime(2026, 1, 5, tzinfo=UTC).timestamp())
+    esperado = int((datetime(2026, 1, 5, tzinfo=UTC) - timedelta(days=2)).timestamp())
     assert int(pedido.url.params["after"]) == esperado
 
 

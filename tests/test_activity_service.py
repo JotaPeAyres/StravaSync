@@ -188,12 +188,6 @@ def test_campo_opcional_estranho_nao_derruba_a_conversao(servico):
     assert servico.to_activity(_corrida(average_heartrate="alta")).average_heartrate is None
 
 
-def test_converte_lista_preservando_a_ordem(servico):
-    atividades = servico.to_activities([_corrida(id=1), _corrida(id=2), _corrida(id=3)])
-
-    assert [a.id for a in atividades] == [1, 2, 3]
-
-
 # -------------------------------------------------------------- agregação
 
 

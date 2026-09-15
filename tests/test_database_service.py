@@ -215,6 +215,12 @@ def test_de_texto_ida_e_volta_com_para_texto():
     assert de_texto(para_texto(momento)) == momento
 
 
+def test_de_texto_assume_utc_quando_a_string_nao_tem_fuso():
+    """`para_texto` sempre grava com offset explícito — este é o ramo para um
+    valor legado ou editado à mão no banco, sem fuso."""
+    assert de_texto("2026-01-01T10:00:00") == datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+
 def test_de_texto_valor_invalido_retorna_none_e_loga_warning(caplog):
     with caplog.at_level("WARNING"):
         resultado = de_texto("isto-nao-e-uma-data")

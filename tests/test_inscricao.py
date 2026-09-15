@@ -15,7 +15,7 @@ from src import inscricao as modulo
 from src.api.rate_limiter import RateLimiter
 from src.api.strava_client import StravaClient
 from src.models.corredor import Corredor
-from src.utils.config import Config
+from src.utils.config import Config, ConfigError
 
 URL_DE_RETORNO = (
     "http://localhost/exchange_token?state=p001&code=abc123&scope=read,activity:read_all"
@@ -95,6 +95,22 @@ def test_sem_subcomando_e_erro_de_uso(cli):
         modulo.main([])
 
     assert saida.value.code == 2
+
+
+def test_sai_com_codigo_1_quando_a_config_falha(monkeypatch, capsys):
+    def falhar(*_args, **_kwargs):
+        raise ConfigError("STRAVA_CLIENT_ID não definida")
+
+    monkeypatch.setattr(modulo, "load_config", falhar)
+
+    assert modulo.main(["estado"]) == 1
+    assert "STRAVA_CLIENT_ID" in capsys.readouterr().err
+
+
+def test_cliente_monta_um_stravaclient_real(cli):
+    """Os testes de `trocar`/`estado` substituem `_cliente` por um dublê com
+    `httpx.MockTransport` — este só confirma que a fiação real compõe."""
+    assert isinstance(modulo._cliente(cli), StravaClient)
 
 
 # ------------------------------------------------------------------------ link
