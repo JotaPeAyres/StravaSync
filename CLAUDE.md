@@ -19,13 +19,14 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
   cota corta a execução no meio) e alerta `CRITICAL` a cada múltiplo de
   `ALERTA_FALHAS_CONSECUTIVAS` falhas seguidas de um mesmo corredor. Ver "Fase 7 (Scheduler) —
   como ficou" abaixo.
-- **Fase 8 (Testes): concluída e na `main`.** 324 → 402 testes: o item central foi um teste
+- **Fase 8 (Testes): concluída e na `main`.** 324 → 420 testes: o item central foi um teste
   E2E com a pilha 100% real (`StravaClient`/`RateLimiter`/`ExcelService`/SQLite) para
   múltiplos corredores na mesma execução — até então nenhum teste provava que o
   `RateLimiter`/`StravaClient` compartilhados funcionavam de fato entre corredores, nem que a
-  falha de um não contaminava os demais. Cobertura de linha em 97% (`pytest --cov=src`, sem
-  gate de CI — o número-alvo é da fase Qualidade). Ver `TASKS.md` › Fase 8 para o detalhe por
-  arquivo.
+  falha de um não contaminava os demais. Cobertura de linha em 98% (`pytest --cov=src`, sem
+  gate de CI — o número-alvo é da fase Qualidade); as ~27 linhas restantes são só blocos
+  `if __name__ == "__main__":` e ramos defensivos contra resposta malformada do Strava, fora
+  de escopo de propósito. Ver `TASKS.md` › Fase 8 para o detalhe por arquivo.
 - **Revisão de código pós-Fase 8**: um code review (`/code-review high`) sobre o projeto
   inteiro (não um diff — `main` estava limpa) achou 10 pontos, corrigidos na branch
   `fase-8-correcoes-review`: dois de correção real (`SyncService._calcular_after` não dava

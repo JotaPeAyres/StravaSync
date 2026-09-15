@@ -17,6 +17,7 @@ from src import main as modulo_main
 from src.models.corredor import Corredor
 from src.repositories.corredor_state_repository import CorredorStateRepository
 from src.services.database_service import DatabaseService
+from src.services.sync_service import SyncService
 from src.utils.config import Config, ConfigError
 from src.utils.errors import AuthorizationError, QuotaExhaustedError, RevokedTokenError
 
@@ -243,6 +244,21 @@ def test_alerta_dispara_so_nos_multiplos_do_limiar(monkeypatch, sem_logging, tmp
 
     modulo_main.main()
     assert "falhou 4 execuções seguidas" in caplog.text
+
+
+def test_montar_sync_service_compoe_as_pecas_reais(tmp_path):
+    """Os demais testes deste arquivo substituem `_montar_sync_service` por um
+    dublê (política, não mecânica) — este só confirma que a fiação real
+    (cliente/limiter/repositórios) compõe sem quebrar."""
+    caminho = tmp_path / "estado.db"
+    banco = DatabaseService(caminho)
+    banco.init_schema()
+    try:
+        config = _config(caminho, "p001")
+        servico = modulo_main._montar_sync_service(config, banco.connect())
+        assert isinstance(servico, SyncService)
+    finally:
+        banco.close()
 
 
 def test_corredores_sao_visitados_do_mais_antigo_para_o_mais_recente(

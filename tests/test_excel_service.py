@@ -25,6 +25,7 @@ from src.services.excel_service import (
     COL_TEMPO,
     ExcelService,
     ResultadoExcel,
+    _como_data,
 )
 from src.utils.errors import (
     DataBaseDivergenteError,
@@ -149,6 +150,26 @@ def test_lista_vazia_nao_toca_o_arquivo(planilha):
 
     assert resultado == ResultadoExcel(0, 0)
     assert planilha.stat().st_mtime_ns == mtime_antes
+
+
+def test_dias_ignorados_soma_todas_as_categorias():
+    resultado = ResultadoExcel(
+        dias_escritos_daily_data=1,
+        dias_escritos_pace=1,
+        dias_descartados=2,
+        dias_alem_do_limite_daily_data=3,
+        dias_alem_do_limite_pace=4,
+        dias_sob_gestao_manual=5,
+        dias_preservados=6,
+    )
+
+    assert resultado.dias_ignorados == 2 + 3 + 4 + 5 + 6
+
+
+def test_como_data_aceita_date_puro():
+    """`isinstance(valor, datetime)` já cobre o que o openpyxl devolve; este
+    ramo é defensivo para quem chamar `_como_data` com um `date` puro."""
+    assert _como_data(date(2026, 3, 1)) == date(2026, 3, 1)
 
 
 # --------------------------------------------------------------- fórmulas/formatação
@@ -372,6 +393,24 @@ def test_dia_de_descanso_nao_e_falso_positivo_de_edicao(planilha):
     assert segundo.dias_preservados == 0
 
 
+def test_edicao_humana_so_no_tempo_e_detectada(planilha):
+    """`_foi_editado_a_mao` compara carga e tempo separadamente — a carga
+    bate com a baseline aqui, só o tempo diverge."""
+    corredor = _corredor(planilha)
+    primeiro = ExcelService().sincronizar(corredor, [_carga(0, km=10.0, minutos=50.0)])
+
+    # Humano corrige só o tempo (ex.: relógio do treino errado); carga intocada.
+    wb = _abrir(planilha)
+    wb[ABA_PACE].cell(row=2, column=COL_TEMPO).value = timedelta(minutes=99)
+    wb.save(planilha)
+
+    segundo = ExcelService().sincronizar(
+        corredor, [_carga(0, km=10.0, minutos=55.0)], ultima_escrita=primeiro.novas_escritas
+    )
+
+    assert segundo.dias_preservados == 1
+
+
 def test_sem_baseline_sempre_escreve(planilha):
     """`ultima_escrita=None` é o comportamento da Fase 5: nunca detecta edição."""
     corredor = _corredor(planilha)
@@ -497,6 +536,42 @@ def test_carga_nao_numerica_vira_zero_com_warning(planilha, caplog):
 
     assert historico.registros[0].carga_km == 0.0
     assert "não é numérico" in caplog.text
+
+
+def test_lacuna_com_texto_nao_reconhecivel_loga_warning(planilha, caplog):
+    """Distinto da lacuna genuína (célula vazia): aqui a célula tem conteúdo,
+    só não é uma data — o outro ramo do `if bruto is not None`."""
+    cutover = INICIO + timedelta(days=2)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    _preencher_linha(wb, corredor, INICIO, 10.0)
+    wb[ABA_DAILY_DATA]["B3"] = "não é uma data"  # linha do Dia 2: texto solto
+
+    wb.save(planilha)
+
+    with caplog.at_level("WARNING"):
+        historico = ExcelService().ler_historico_manual(corredor)
+
+    assert historico.lacunas == (INICIO + timedelta(days=1),)
+    assert "não é uma data reconhecível" in caplog.text
+
+
+def test_carga_em_branco_no_historico_vira_zero_sem_warning(planilha, caplog):
+    """Distinto do texto solto: célula genuinamente vazia (`None`) não passa
+    pelo `except` — é o próprio `if valor is None` que devolve 0.0."""
+    cutover = INICIO + timedelta(days=1)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = _abrir(planilha)
+    wb[ABA_DAILY_DATA]["B2"] = INICIO  # data presente; carga (C2) fica em branco
+    wb.save(planilha)
+
+    with caplog.at_level("WARNING"):
+        historico = ExcelService().ler_historico_manual(corredor)
+
+    assert historico.registros[0].carga_km == 0.0
+    assert "não é numérico" not in caplog.text
 
 
 def test_ler_historico_valida_b2(planilha):

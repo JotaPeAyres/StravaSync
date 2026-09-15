@@ -16,6 +16,7 @@ from src.utils.config import (
     Config,
     ConfigError,
     load_config,
+    mascarar,
 )
 
 VARIAVEIS = (
@@ -374,6 +375,19 @@ def test_safe_summary_mascara_e_conta_corredores(monkeypatch, ambiente_limpo, tm
     assert "pausa=" in resumo
     assert "reserva=" in resumo
     assert "alerta_falhas=" in resumo
+
+
+def test_mascarar_mostra_so_os_ultimos_4_caracteres():
+    assert mascarar("abcdefgh1234") == "****1234"
+
+
+def test_mascarar_segredo_curto_vira_so_asteriscos():
+    """4 caracteres ou menos: mostrar os "últimos 4" seria mostrar tudo."""
+    assert mascarar("abc") == "****"
+
+
+def test_mascarar_vazio_vira_so_asteriscos():
+    assert mascarar("") == "****"
 
 
 def test_vazao_tem_padroes(monkeypatch, ambiente_limpo, tmp_path):
