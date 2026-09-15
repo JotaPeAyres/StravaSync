@@ -19,6 +19,11 @@ from src.repositories.activity_repository import ActivityRepository
 from src.services.adocao_service import AdocaoService, ResultadoAdocao
 from src.services.database_service import DatabaseService
 from src.services.excel_service import ABA_DAILY_DATA, ABA_PACE, COL_CARGA, COL_DATA, COL_TEMPO
+from src.utils.errors import (
+    GradeDesalinhadaError,
+    PlanilhaEmUsoError,
+    PlanilhaNaoEncontradaError,
+)
 
 TEMPLATE = Path(__file__).resolve().parents[1] / "Cópia de Planilha_carga_corrida.xlsx"
 INICIO = date(2026, 1, 1)
@@ -157,3 +162,85 @@ def test_nao_escreve_no_excel(planilha, servico):
     servico.adotar(corredor)
 
     assert planilha.stat().st_mtime_ns == mtime_antes
+
+
+def test_relatorio_sem_pendencias_quando_tudo_completo(planilha, servico):
+    cutover = INICIO + timedelta(days=2)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = openpyxl.load_workbook(planilha)
+    _preencher(wb, corredor, INICIO, 10.0, 50.0)
+    _preencher(wb, corredor, INICIO + timedelta(days=1), 0.0)
+    wb.save(planilha)
+
+    resultado = servico.adotar(corredor)
+
+    assert resultado.tem_pendencias is False
+
+
+# --------------------------------------------------------------------- erros
+
+
+def test_grade_desalinhada_propaga_sem_gravar_nada_parcial(planilha, banco, servico):
+    """Linha com data errada é sinal de linha inserida/apagada à mão (Fase 5.5)."""
+    cutover = INICIO + timedelta(days=3)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = openpyxl.load_workbook(planilha)
+    _preencher(wb, corredor, INICIO, 10.0, 50.0)
+    linha_errada = corredor.dia_da_planilha(INICIO + timedelta(days=1)) + 1
+    wb[ABA_DAILY_DATA].cell(row=linha_errada, column=COL_DATA).value = INICIO + timedelta(days=10)
+    wb.save(planilha)
+
+    with pytest.raises(GradeDesalinhadaError):
+        servico.adotar(corredor)
+
+    repo = ActivityRepository(banco.connect())
+    assert repo.por_periodo("p001", INICIO, cutover - timedelta(days=1)) == ()
+
+
+def test_planilha_ausente_propaga_planilhanaoencontradaerror(servico, tmp_path):
+    corredor = _corredor(tmp_path / "nao-existe.xlsx", cutover_date=INICIO + timedelta(days=2))
+
+    with pytest.raises(PlanilhaNaoEncontradaError):
+        servico.adotar(corredor)
+
+
+def test_planilha_em_uso_propaga_planilhaemusoerror(planilha, servico, monkeypatch):
+    import src.services.excel_service as modulo_excel_service
+
+    def falhar(*_args, **_kwargs):
+        raise PermissionError("arquivo em uso")
+
+    monkeypatch.setattr(modulo_excel_service.openpyxl, "load_workbook", falhar)
+    corredor = _corredor(planilha, cutover_date=INICIO + timedelta(days=2))
+
+    with pytest.raises(PlanilhaEmUsoError):
+        servico.adotar(corredor)
+
+
+def test_duas_adocoes_com_conexoes_distintas_nao_duplicam(planilha, tmp_path):
+    """Simula duas execuções concorrentes apontando para o mesmo arquivo de banco."""
+    from src.services.excel_service import ExcelService
+
+    cutover = INICIO + timedelta(days=2)
+    corredor = _corredor(planilha, cutover_date=cutover)
+
+    wb = openpyxl.load_workbook(planilha)
+    _preencher(wb, corredor, INICIO, 10.0, 50.0)
+    wb.save(planilha)
+
+    caminho_banco = tmp_path / "estado.db"
+    banco1 = DatabaseService(caminho_banco)
+    banco1.init_schema()
+    banco2 = DatabaseService(caminho_banco)
+
+    try:
+        AdocaoService(ExcelService(), ActivityRepository(banco1.connect())).adotar(corredor)
+        AdocaoService(ExcelService(), ActivityRepository(banco2.connect())).adotar(corredor)
+
+        achadas = ActivityRepository(banco1.connect()).por_periodo("p001", INICIO, INICIO)
+        assert len(achadas) == 1  # não duplicou
+    finally:
+        banco1.close()
+        banco2.close()
