@@ -91,10 +91,6 @@ class ActivityService:
             start_date_utc=_data_utc(payload, rotulo),
         )
 
-    def to_activities(self, payloads: list[dict]) -> list[Activity]:
-        """Converte uma lista de atividades, na ordem recebida."""
-        return [self.to_activity(payload) for payload in payloads]
-
     def aggregate_daily(self, day: date, activities: Iterable[Activity]) -> DailyLoad:
         """Agrega as corridas de **um dia** num `DailyLoad`.
 

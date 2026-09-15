@@ -12,8 +12,7 @@ import sqlite3
 import sys
 from datetime import UTC, datetime
 
-from src.api.rate_limiter import RateLimiter
-from src.api.strava_client import StravaClient
+from src.api.strava_client import montar_cliente
 from src.models.corredor import Corredor
 from src.repositories.activity_repository import ActivityRepository
 from src.repositories.corredor_state_repository import CorredorStateRepository
@@ -65,15 +64,12 @@ def main() -> int:
 
 def _montar_sync_service(config: Config, conn: sqlite3.Connection) -> SyncService:
     """Constrói o `SyncService` com uma instância única de cliente e limitador."""
-    limiter = RateLimiter(
-        pausa_s=config.strava_pausa_entre_chamadas_s,
-        reserva=config.strava_reserva_de_vazao,
-    )
-    client = StravaClient(
+    client = montar_cliente(
         config.strava_client_id,
         config.strava_client_secret,
-        limiter=limiter,
         timeout_s=config.strava_timeout_s,
+        pausa_s=config.strava_pausa_entre_chamadas_s,
+        reserva=config.strava_reserva_de_vazao,
     )
     activity_repository = ActivityRepository(conn)
     excel_service = ExcelService()
@@ -117,13 +113,14 @@ def sincronizar_todos(
                 ", ".join(pendentes),
             )
             break
-        except RevokedTokenError as erro:
-            # Já marcado para reinscrição por `auth.obter_access_token`/`chamar_renovando`.
-            logger.error("Corredor %s precisa reinscrever-se: %s", corredor, erro)
-            falhas += 1
-            _registrar_falha_e_alertar(corredor, corredor_state, config)
         except (AuthorizationError, StravaError) as erro:
-            logger.error("Corredor %s: %s", corredor, erro)
+            # RevokedTokenError é subclasse de AuthorizationError (já marcada
+            # para reinscrição por `auth.obter_access_token`/`chamar_renovando`)
+            # — as duas categorias só diferem na mensagem de log.
+            if isinstance(erro, RevokedTokenError):
+                logger.error("Corredor %s precisa reinscrever-se: %s", corredor, erro)
+            else:
+                logger.error("Corredor %s: %s", corredor, erro)
             falhas += 1
             _registrar_falha_e_alertar(corredor, corredor_state, config)
         except Exception:

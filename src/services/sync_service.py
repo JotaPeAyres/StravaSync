@@ -13,10 +13,12 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from itertools import groupby
 
 from src.api.strava_client import StravaClient
 from src.models.activity import Activity
 from src.models.corredor import Corredor
+from src.models.daily_load import DailyLoad
 from src.repositories.activity_repository import ActivityRepository
 from src.repositories.corredor_state_repository import CorredorStateRepository
 from src.repositories.escrita_excel_repository import EscritaExcelRepository
@@ -100,10 +102,7 @@ class SyncService:
 
         baseline = self._escritas.carregar(corredor.id)
         dias = self._dias_para_escrever(corredor, gravacao.dias_afetados, baseline)
-        daily_loads = [
-            self._activity_service.aggregate_daily(dia, self._activities.por_dia(corredor.id, dia))
-            for dia in dias
-        ]
+        daily_loads = self._agregar_dias(corredor, dias)
 
         resultado_excel = self._excel.sincronizar(corredor, daily_loads, ultima_escrita=baseline)
         self._escritas.registrar_muitas(corredor.id, resultado_excel.novas_escritas)
@@ -138,14 +137,27 @@ class SyncService:
         return self._adocao.adotar(corredor)
 
     def _calcular_after(self, corredor: Corredor) -> int:
-        """`after=` para a busca: `max(meia-noite UTC de cutover_date,
-        ultimo_evento_em - 2 dias)` — a fórmula travada em CLAUDE.md.
+        """`after=` para a busca: `max(meia-noite UTC de cutover_date, ultimo_evento_em
+        - 2 dias) - 2 dias de folga` — a fórmula travada em CLAUDE.md, corrigida
+        pelo achado do code review da Fase 8.
 
         A data-base é `cutover_date`, não `start_date`: o período manual
         (Fase 5.5) já está no SQLite pela adoção, e não deve ser buscado de
         novo no Strava.
+
+        O piso também recebe `FOLGA_DA_BUSCA`, e não só o `ultimo_evento_em`:
+        `cutover_date` é um dia-calendário **local** do corredor, mas a meia-
+        noite UTC dele não coincide com a meia-noite local em fusos != 0. Sem
+        a folga, uma corrida perto da virada do dia (fuso positivo) podia
+        nunca ser buscada — `after` só avança, então o buraco seria
+        permanente. A mesma folga já cobria isso via `ultimo_evento_em -
+        FOLGA_DA_BUSCA` a partir da segunda sincronização; faltava na
+        primeira, quando `ultimo` ainda é `None`. A contrapartida (a busca
+        pode alcançar um pouco do território manual, antes de `cutover_date`)
+        é resolvida por `_converter_tolerando_falhas`, que descarta qualquer
+        atividade anterior a `start_date` antes de gravar.
         """
-        piso = datetime.combine(corredor.cutover_date, time.min, tzinfo=UTC)
+        piso = datetime.combine(corredor.cutover_date, time.min, tzinfo=UTC) - FOLGA_DA_BUSCA
         ultimo = self._activities.ultimo_evento_em(corredor.id)
         inicio = max(piso, ultimo - FOLGA_DA_BUSCA) if ultimo is not None else piso
         return int(inicio.timestamp())
@@ -158,14 +170,35 @@ class SyncService:
         Uma corrida com campo faltando não pode custar as demais do corredor
         — mesmo princípio de isolamento que rege a execução como um todo,
         aplicado um nível abaixo.
+
+        Também descarta o que vier anterior a `start_date` (`dia <= 0`, no
+        vocabulário de `Corredor.dia_da_planilha`): o `ExcelService` já
+        recusa escrever essas linhas, mas o CLAUDE.md pede uma segunda
+        checagem aqui, independente — a folga do `after=` (ver
+        `_calcular_after`) pode alcançar alguns dias antes do que o cadastro
+        cobre, e nada deve confiar sozinho na outra ponta.
         """
         corridas = self._activity_service.only_runs(list(payloads))
         atividades: list[Activity] = []
         for payload in corridas:
             try:
-                atividades.append(self._activity_service.to_activity(payload))
+                atividade = self._activity_service.to_activity(payload)
             except InvalidResponseError as erro:
                 logger.warning("Corredor %s: atividade descartada — %s", corredor, erro)
+                continue
+
+            if corredor.dia_da_planilha(atividade.day) <= 0:
+                logger.warning(
+                    "Corredor %s: atividade %s em %s é anterior ao Dia 1 (%s) — fora "
+                    "do escopo do estudo, descartada antes de gravar.",
+                    corredor,
+                    atividade.id,
+                    atividade.day.isoformat(),
+                    corredor.start_date.isoformat(),
+                )
+                continue
+
+            atividades.append(atividade)
         return atividades
 
     def _detectar_apagadas(
@@ -191,6 +224,26 @@ class SyncService:
                 atividade.name or "sem nome",
             )
         return len(apagadas)
+
+    def _agregar_dias(self, corredor: Corredor, dias: list[date]) -> list[DailyLoad]:
+        """Agrega cada dia de `dias` num `DailyLoad`, com uma única consulta ao
+        banco em vez de uma por dia.
+
+        A janela self-healing de `_dias_para_escrever` pode cobrir meses
+        inteiros quando uma execução do scheduler ficou parada — `por_dia`
+        em loop viraria uma consulta por dia recuperado. `por_periodo` traz
+        tudo de uma vez (a ordenação por `day` já vem do SQL, então
+        `groupby` é suficiente para separar por dia).
+        """
+        if not dias:
+            return []
+
+        atividades = self._activities.por_periodo(corredor.id, dias[0], dias[-1])
+        por_dia = {dia: tuple(grupo) for dia, grupo in groupby(atividades, key=lambda a: a.day)}
+        return [
+            self._activity_service.aggregate_daily(dia, por_dia.get(dia, ()))
+            for dia in dias
+        ]
 
     def _dias_para_escrever(
         self,

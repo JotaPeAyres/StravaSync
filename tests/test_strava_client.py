@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from src.api.rate_limiter import MAX_TENTATIVAS_429, RateLimiter
-from src.api.strava_client import MAX_PAGINAS, PER_PAGE, StravaClient
+from src.api.strava_client import MAX_PAGINAS, PER_PAGE, StravaClient, montar_cliente
 from src.utils.errors import (
     ExpiredAccessTokenError,
     ExpiredCodeError,
@@ -122,6 +122,18 @@ def test_refresh_token_revogado_e_distinto_do_code():
         _cliente(servidor).refresh_access_token("refresh-morto")
 
 
+def test_refresh_token_com_code_diferente_de_invalid_nao_e_revogacao():
+    """A distinção do CLAUDE.md é o PAR `resource`/`code`, não só o `resource`
+    — um 400 de RefreshToken por outro motivo não pode marcar o participante
+    para reinscrição por engano (achado do code review da Fase 8)."""
+    servidor = _Servidor(_erro_strava(400, "RefreshToken", codigo="outro-motivo"))
+
+    with pytest.raises(StravaError) as excinfo:
+        _cliente(servidor).refresh_access_token("refresh-1")
+
+    assert not isinstance(excinfo.value, RevokedTokenError)
+
+
 def test_resposta_de_token_incompleta_e_erro():
     servidor = _Servidor(_resposta(json={"access_token": "só-isso"}))
 
@@ -179,6 +191,21 @@ def test_paginacao_infinita_e_interrompida():
 
     with pytest.raises(InvalidResponseError, match="paginação"):
         _cliente(servidor).get_activities("access-1", after=0)
+
+
+def test_total_multiplo_exato_de_max_paginas_nao_e_confundido_com_infinita():
+    """Uma página de confirmação decide se a última página cheia era, por
+    coincidência, a última mesmo — sem ela, um backlog de exatamente
+    `MAX_PAGINAS * PER_PAGE` atividades abortaria por engano (achado do code
+    review da Fase 8)."""
+    cheia = [_corrida(i) for i in range(PER_PAGE)]
+    respostas = [_resposta(json=cheia) for _ in range(MAX_PAGINAS)] + [_resposta(json=[])]
+    servidor = _Servidor(*respostas)
+
+    atividades = _cliente(servidor).get_activities("access-1", after=0)
+
+    assert len(atividades) == MAX_PAGINAS * PER_PAGE
+    assert len(servidor.requisicoes) == MAX_PAGINAS + 1  # inclui a página de confirmação
 
 
 def test_resposta_de_atividades_fora_do_formato():
@@ -311,3 +338,18 @@ def test_segredos_nao_aparecem_no_repr_nem_no_log(caplog):
     assert "12345" not in repr(cliente)
     assert "refresh-secretissimo" not in caplog.text
     assert "access-novo" not in caplog.text
+
+
+# ---------------------------------------------------------------- montar_cliente
+
+
+def test_montar_cliente_fia_client_id_e_timeout():
+    """Ponto único de fiação cliente+limitador, reaproveitado por `main.py` e
+    `inscricao.py` (achado do code review da Fase 8: os dois montavam isso
+    cada um por si)."""
+    cliente = montar_cliente(
+        "12345", "segredo-do-app", timeout_s=5.0, pausa_s=0.0, reserva=10
+    )
+
+    assert "segredo-do-app" not in repr(cliente)
+    assert "12345" not in repr(cliente)

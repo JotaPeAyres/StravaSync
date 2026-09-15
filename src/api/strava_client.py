@@ -122,29 +122,44 @@ class StravaClient:
         return list(self.iter_activities(access_token, after=after))
 
     def iter_activities(self, access_token: str, *, after: int) -> Iterator[dict]:
-        """Percorre as páginas de atividades, uma atividade por vez."""
-        for pagina in range(1, MAX_PAGINAS + 1):
-            lote = self._api(
-                "/athlete/activities",
-                access_token,
-                params={"after": after, "page": pagina, "per_page": PER_PAGE},
-            )
-            if not isinstance(lote, list):
-                raise InvalidResponseError(
-                    f"resposta de /athlete/activities (página {pagina}) não é uma lista"
-                )
+        """Percorre as páginas de atividades, uma atividade por vez.
 
-            yield from lote
+        Se a página `MAX_PAGINAS` vier cheia, uma página extra de confirmação
+        decide se aquilo era só coincidência — o total é um múltiplo exato de
+        `PER_PAGE` — ou paginação de fato descontrolada. Sem essa
+        confirmação, um corredor cujo backlog somasse exatamente
+        `MAX_PAGINAS * PER_PAGE` atividades seria abortado por engano.
+        """
+        ultimo_lote: list = []
+        for pagina in range(1, MAX_PAGINAS + 1):
+            ultimo_lote = self._pagina_de_atividades(access_token, after, pagina)
+            yield from ultimo_lote
 
             # Página incompleta significa fim: evita uma requisição a mais por
             # corredor, que com 50+ participantes vira cota desperdiçada.
-            if len(lote) < PER_PAGE:
+            if len(ultimo_lote) < PER_PAGE:
                 return
 
+        confirmacao = self._pagina_de_atividades(access_token, after, MAX_PAGINAS + 1)
+        if not confirmacao:
+            return  # a última página cheia era, por coincidência, a última mesmo
+
         raise InvalidResponseError(
-            f"paginação passou de {MAX_PAGINAS} páginas ({MAX_PAGINAS * PER_PAGE} atividades) — "
-            "interrompida por segurança"
+            f"paginação passou de {MAX_PAGINAS} páginas ({MAX_PAGINAS * PER_PAGE} atividades) "
+            "mesmo após página de confirmação — interrompida por segurança"
         )
+
+    def _pagina_de_atividades(self, access_token: str, after: int, pagina: int) -> list[dict]:
+        lote = self._api(
+            "/athlete/activities",
+            access_token,
+            params={"after": after, "page": pagina, "per_page": PER_PAGE},
+        )
+        if not isinstance(lote, list):
+            raise InvalidResponseError(
+                f"resposta de /athlete/activities (página {pagina}) não é uma lista"
+            )
+        return lote
 
     # --------------------------------------------------------------- interno
 
@@ -217,6 +232,26 @@ class StravaClient:
         )
 
 
+def montar_cliente(
+    client_id: str,
+    client_secret: str,
+    *,
+    timeout_s: float,
+    pausa_s: float,
+    reserva: int,
+) -> StravaClient:
+    """Constrói o `StravaClient` com um `RateLimiter` próprio da chamada.
+
+    Ponto único da fiação cliente+limitador — reaproveitado por `main.py`
+    (execução agendada) e `inscricao.py` (CLI de operador), que dividem a
+    mesma cota da aplicação e não podem divergir na configuração do
+    limitador. Antes da Fase 8 os dois módulos montavam isso cada um por si,
+    com risco real de um mudar e o outro ficar para trás.
+    """
+    limiter = RateLimiter(pausa_s=pausa_s, reserva=reserva)
+    return StravaClient(client_id, client_secret, limiter=limiter, timeout_s=timeout_s)
+
+
 def _levantar_erro(resposta: httpx.Response) -> None:
     """Traduz uma resposta de erro do Strava na exceção certa.
 
@@ -234,7 +269,11 @@ def _levantar_erro(resposta: httpx.Response) -> None:
                 "o código de autorização já foi usado ou expirou — gere um link novo "
                 "(`python -m src.inscricao link <id>`) e peça ao participante para autorizar de novo"
             )
-        if recurso == "RefreshToken":
+        # O par completo importa, não só `resource`: um 400 de RefreshToken por
+        # outro motivo de validação (código diferente de "invalid") não é
+        # revogação, e classificá-lo como tal marcaria o corredor para
+        # reinscrição por engano, tirando-o da coleta sem necessidade.
+        if recurso == "RefreshToken" and codigo == "invalid":
             raise RevokedTokenError(
                 "o refresh token não é mais válido (revogado no Strava ou substituído) — "
                 "o participante precisa autorizar de novo"

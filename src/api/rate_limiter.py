@@ -119,6 +119,12 @@ class RateLimiter:
         # relógio monotônico já andou o tempo da espera — a pausa seguinte sai
         # satisfeita sozinha, sem dormir de novo à toa.
         self._dormir(espera)
+        # Como em `_esperar_janela_curta`: depois de esperar, o contador local
+        # zera. Sem isso, `_uso_curto` continuaria no teto e a chamada seguinte
+        # (via `antes_da_chamada`) dormiria quase uma janela inteira de novo,
+        # dobrando a recuperação depois de cada 429 — a próxima resposta real
+        # corrige o valor de qualquer forma, via `registrar_resposta`.
+        self._uso_curto = 0
         return espera
 
     @property

@@ -13,12 +13,29 @@ Contexto do projeto para o Claude Code. **Leia isto antes de agir.** Documento v
   (com adoção de planilhas preenchidas à mão) e `SyncService`/`main.py` amarrando tudo —
   ver as seções por fase abaixo para os detalhes de cada uma. 309 testes, tudo com
   `httpx.MockTransport` e o template real do Excel — **nenhuma credencial real foi usada**.
-- **Fase 7 (Scheduler): implementada na branch `fase-7-scheduler`**, ainda **não mergeada**.
-  Entrega: `src/scheduler.py` (wrapper para agendador externo, delega para `main.main()`),
-  schema v4 (`corredor_state.falhas_consecutivas`), ordenação de `sincronizar_todos` por
-  corredor sincronizado há mais tempo (rotação quando a cota corta a execução no meio) e
-  alerta `CRITICAL` a cada múltiplo de `ALERTA_FALHAS_CONSECUTIVAS` falhas seguidas de um
-  mesmo corredor. 324 testes. Ver "Fase 7 (Scheduler) — como ficou" abaixo.
+- **Fase 7 (Scheduler): concluída e na `main`.** Entrega: `src/scheduler.py` (wrapper para
+  agendador externo, delega para `main.main()`), schema v4 (`corredor_state.falhas_consecutivas`),
+  ordenação de `sincronizar_todos` por corredor sincronizado há mais tempo (rotação quando a
+  cota corta a execução no meio) e alerta `CRITICAL` a cada múltiplo de
+  `ALERTA_FALHAS_CONSECUTIVAS` falhas seguidas de um mesmo corredor. Ver "Fase 7 (Scheduler) —
+  como ficou" abaixo.
+- **Fase 8 (Testes): concluída e na `main`.** 324 → 402 testes: o item central foi um teste
+  E2E com a pilha 100% real (`StravaClient`/`RateLimiter`/`ExcelService`/SQLite) para
+  múltiplos corredores na mesma execução — até então nenhum teste provava que o
+  `RateLimiter`/`StravaClient` compartilhados funcionavam de fato entre corredores, nem que a
+  falha de um não contaminava os demais. Cobertura de linha em 97% (`pytest --cov=src`, sem
+  gate de CI — o número-alvo é da fase Qualidade). Ver `TASKS.md` › Fase 8 para o detalhe por
+  arquivo.
+- **Revisão de código pós-Fase 8**: um code review (`/code-review high`) sobre o projeto
+  inteiro (não um diff — `main` estava limpa) achou 10 pontos, corrigidos na branch
+  `fase-8-correcoes-review`: dois de correção real (`SyncService._calcular_after` não dava
+  folga de fuso na primeira sincronização de um corredor, e nada descartava atividades
+  anteriores ao `start_date` antes de persistir — as duas juntas podiam, em fusos != 0, perder
+  uma corrida para sempre ou duplicar um dia de território manual), mais classificação de
+  `RevokedTokenError` sem checar o `code` do erro, um `_uso_curto` do `RateLimiter` que não
+  zerava depois de um 429 (dobrando a espera seguinte), paginação da API falsamente
+  interrompida num múltiplo exato de `MAX_PAGINAS`, uma consulta N+1 na agregação diária, e
+  três limpezas de duplicação/código morto.
 - **Pendência bloqueante para validar de verdade** (Fases 3 a 7 dependem do Strava real):
   registrar o app no Strava (*Authorization Callback Domain* = `localhost`) e preencher
   `STRAVA_CLIENT_ID`/`STRAVA_CLIENT_SECRET` no `.env`, hoje vazios. Não bloqueia o
