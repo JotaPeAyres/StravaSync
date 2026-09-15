@@ -12,6 +12,8 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 
 # Ambiente e segredos
 .env
